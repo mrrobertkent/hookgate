@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="320" viewBox="0 0 1280 320">
+  <rect x="1" y="1" width="1278" height="318" rx="24" fill="#0b1220" stroke="#1e293b" stroke-width="2"/>
+
+  <g transform="translate(34 0)">
+    <!-- requests: forged ones stop at the gate, verified ones pass -->
+    <g stroke-linecap="round">
+      <line x1="72" y1="116" x2="142" y2="116" stroke="#475569" stroke-width="5" stroke-dasharray="2 15"/>
+      <line x1="72" y1="160" x2="142" y2="160" stroke="#475569" stroke-width="5" stroke-dasharray="2 15"/>
+      <line x1="72" y1="204" x2="142" y2="204" stroke="#475569" stroke-width="5" stroke-dasharray="2 15"/>
+      <line x1="284" y1="160" x2="320" y2="160" stroke="#22c55e" stroke-width="5"/>
+      <path d="M311 149 L323 160 L311 171" fill="none" stroke="#22c55e" stroke-width="5" stroke-linejoin="round"/>
+    </g>
+
+    <!-- gate -->
+    <rect x="154" y="76" width="118" height="168" rx="20" fill="#111a2e" stroke="#22c55e" stroke-width="6"/>
+    <rect x="171" y="94" width="11" height="132" rx="5.5" fill="#1e293b"/>
+    <rect x="244" y="94" width="11" height="132" rx="5.5" fill="#1e293b"/>
+    <path d="M188 163 L207 182 L238 141" fill="none" stroke="#22c55e" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <text x="366" y="168" font-family="Inter, sans-serif" font-size="96" font-weight="800" letter-spacing="-2.5" fill="#f8fafc">hookgate</text>
+    <text x="370" y="226" font-family="Inter, sans-serif" font-size="32" font-weight="500" fill="#cbd5e1">Verify every webhook. Forward only the <tspan fill="#22c55e" font-weight="700">real</tspan> ones.</text>
+  </g>
+</svg>
