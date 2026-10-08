@@ -71,6 +71,8 @@ secrets:
     optional: true                 # may be unset or missing
 ```
 
+Token and HMAC secrets must be at least 16 bytes; use a random value such as `openssl rand -hex 32`. A shorter secret, optional or not, makes its source not ready, and the error names the reference, never the value.
+
 A non-optional secret that is unset, empty or unreadable makes its source **not ready**: the source answers `503` and forwards nothing, the error is logged, and `hookgate_source_ready{source=...}` is `0`. Other sources keep serving. A check whose secrets are all optional and all unset is also not ready, so a source can never run without a secret.
 
 **Rotation:** add the new secret as a second, optional reference, deploy, switch the sender to the new secret, then remove the old reference.
