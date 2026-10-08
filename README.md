@@ -1,3 +1,9 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset=".github/banner-light.png">
+  <img alt="hookgate: a gate with a green check mark lets verified webhook requests through. Verify every webhook. Forward only the real ones." src=".github/banner-light.png">
+</picture>
+
 # hookgate
 
 **Verify every webhook. Forward only the real ones.**
