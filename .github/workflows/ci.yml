@@ -69,6 +69,24 @@ jobs:
         with:
           version: v2.14.0
 
+  sonar:
+    runs-on: ubuntu-latest
+    env:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}   # empty on fork pull requests; the scan is skipped there
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Test with coverage
+        if: env.SONAR_TOKEN != ''
+        run: go test -count=1 -coverprofile=coverage.out ./...
+      - uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        if: env.SONAR_TOKEN != ''
+
   govulncheck:
     runs-on: ubuntu-latest
     steps:

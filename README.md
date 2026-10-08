@@ -14,6 +14,7 @@ hookgate is a lightweight webhook gateway: a single static binary that checks ea
 [![Release](https://img.shields.io/github/v/release/mrrobertkent/hookgate)](https://github.com/mrrobertkent/hookgate/releases/latest)
 [![Go Reference](https://pkg.go.dev/badge/github.com/mrrobertkent/hookgate.svg)](https://pkg.go.dev/github.com/mrrobertkent/hookgate)
 [![License](https://img.shields.io/github/license/mrrobertkent/hookgate)](LICENSE)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mrrobertkent_hookgate&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mrrobertkent_hookgate)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mrrobertkent/hookgate/badge)](https://scorecard.dev/viewer/?uri=github.com/mrrobertkent/hookgate)
 [![Container](https://img.shields.io/badge/ghcr.io-mrrobertkent%2Fhookgate-blue?logo=docker)](https://github.com/mrrobertkent/hookgate/pkgs/container/hookgate)
 
