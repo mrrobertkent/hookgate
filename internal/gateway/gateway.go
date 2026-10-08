@@ -217,7 +217,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 	g.m.draining.Store(true)
 	g.log.Info("draining", "drain_delay", g.cfg.DrainDelay.String())
 	time.Sleep(g.cfg.DrainDelay)
-	sctx, cancel := context.WithTimeout(context.Background(), g.cfg.ShutdownTimeout)
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), g.cfg.ShutdownTimeout)
 	defer cancel()
 	err = srv.Shutdown(sctx)
 	_ = admin.Shutdown(sctx)
