@@ -6,8 +6,6 @@
 
 # hookgate
 
-**Verify every webhook. Forward only the real ones.**
-
 hookgate is a lightweight webhook gateway: a single static binary that checks each incoming webhook against its sender's signature or token and forwards only authentic requests, byte for byte, to your OpenTelemetry Collector, ClickHouse, Vector or any HTTP backend.
 
 [Configuration](docs/configuration.md) · [Releases](https://github.com/mrrobertkent/hookgate/releases) · [Example](examples/hookgate.yaml) · [Security](SECURITY.md)
@@ -82,6 +80,7 @@ curl -i localhost:8080/github -H "X-Hub-Signature-256: sha256=$SIG" --data-binar
 ## Install
 
 - **Container:** `ghcr.io/mrrobertkent/hookgate:<version>` (linux/amd64, linux/arm64). Pin a version or digest in production.
+- **Docker Compose:** [examples/compose](examples/compose/) runs the pinned image with a health check, a restart policy and both ports on loopback behind your reverse proxy.
 - **Binary:** download from [Releases](https://github.com/mrrobertkent/hookgate/releases) and check it with `sha256sum -c checksums.txt`.
 - **Go:** `go install github.com/mrrobertkent/hookgate/cmd/hookgate@latest`
 

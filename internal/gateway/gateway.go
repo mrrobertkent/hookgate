@@ -133,8 +133,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, v := range s.verifiers {
-		if err := v.Verify(r.Header, body); err != nil {
-			reply(s.cfg.RejectStatus, "rejected", err.Error(), "bytes", len(body))
+		if verr := v.Verify(r.Header, body); verr != nil {
+			reply(s.cfg.RejectStatus, "rejected", verr.Error(), "bytes", len(body))
 			return
 		}
 	}
@@ -210,8 +210,8 @@ func (g *Gateway) Run(ctx context.Context) error {
 	g.log.Info("listening", "addr", ln.Addr().String(), "admin", aln.Addr().String(), "sources", strconv.Itoa(len(g.sources)))
 
 	select {
-	case err := <-errc:
-		return err
+	case serveErr := <-errc:
+		return serveErr
 	case <-ctx.Done():
 	}
 	g.m.draining.Store(true)

@@ -17,6 +17,7 @@ go test -race ./...
 go test -run='^$' -fuzz=FuzzHMAC -fuzztime=30s ./internal/verify
 go vet ./...
 gofmt -l .
+golangci-lint run   # version pinned in .github/workflows/ci.yml
 ```
 
 Keep the dependency list short: hookgate depends only on the Go standard library and a YAML parser. Every verification change needs tests for the valid case, the forged case, the missing-header case and the missing-secret case.
