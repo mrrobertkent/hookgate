@@ -50,6 +50,13 @@ jobs:
               --tmpfs /var/lib/otelcol/queue -v "$PWD/$config:/etc/otelcol-contrib/config.yaml:ro" \
               "$collector" validate --config=/etc/otelcol-contrib/config.yaml
           done
+      - name: Validate the Docker Compose example
+        working-directory: examples/compose
+        env:
+          GITHUB_WEBHOOK_SECRET: example-github-secret
+        run: |
+          go run ../../cmd/hookgate validate -config hookgate.yaml
+          docker compose --profile demo config --quiet
 
   govulncheck:
     runs-on: ubuntu-latest

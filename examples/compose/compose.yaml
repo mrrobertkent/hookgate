@@ -1,0 +1,28 @@
+name: hookgate
+
+services:
+  hookgate:
+    image: ghcr.io/mrrobertkent/hookgate:0.1.1@sha256:e4169366c91182963595b759cafd74a9c7f8f03365121e3d4b97e834cbfed59e
+    restart: unless-stopped
+    ports:
+      - "8080:8080"               # webhooks; put your TLS-terminating reverse proxy in front
+      - "127.0.0.1:9090:9090"     # /healthz, /readyz, /metrics: loopback only
+    environment:
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set it in .env}
+    volumes:
+      - ./hookgate.yaml:/etc/hookgate/hookgate.yaml:ro
+    healthcheck:
+      test: ["CMD", "hookgate", "healthcheck"]
+      interval: 30s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    stop_grace_period: 60s        # above drain_delay + shutdown_timeout
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  # Stand-in upstream for trying the example: docker compose --profile demo up -d --wait
+  backend:
+    profiles: [demo]
+    image: ealen/echo-server:0.9.2@sha256:006b92e1d6682442e29d1d0d73c34a61166d42f8a5bf1ea10c318f07ad4790e2
