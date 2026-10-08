@@ -24,7 +24,7 @@ Data pipelines are built to accept whatever arrives. A webhook endpoint in front
 hookgate closes that path:
 
 - **Verifies per sender.** Static tokens and HMAC-SHA1/256/512 signatures in hex, base64 or base64url, with prefixes and multi-signature headers. Every check of a source must pass.
-- **Fails closed.** A missing secret takes its own source offline (`503`), never open. Unknown config keys stop startup.
+- **Fails closed.** A missing or too-short secret takes its own source offline (`503`), never open. Unknown config keys stop startup.
 - **Forwards exactly what it verified.** The upstream receives the verified bytes and an allowlist of headers, nothing else, with retries across instances.
 - **Costs almost nothing.** One ~16 MB distroless image, no database, no queue, Prometheus metrics built in.
 
@@ -63,7 +63,7 @@ sources:
       urls: ["http://echo/"]
 EOF
 
-docker run --rm --network hookgate-demo -p 8080:8080 -e GITHUB_WEBHOOK_SECRET=s3cret \
+docker run --rm --network hookgate-demo -p 8080:8080 -e GITHUB_WEBHOOK_SECRET=demo-secret-change-me \
   -v "$PWD/hookgate.yaml:/etc/hookgate/hookgate.yaml:ro" ghcr.io/mrrobertkent/hookgate
 ```
 
@@ -71,7 +71,7 @@ Send a signed request and a forged one:
 
 ```sh
 BODY='{"zen":"Keep it logically awesome."}'
-SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac s3cret -hex | awk '{print $NF}')
+SIG=$(printf '%s' "$BODY" | openssl dgst -sha256 -hmac demo-secret-change-me -hex | awk '{print $NF}')
 
 curl -i localhost:8080/github -H "X-Hub-Signature-256: sha256=$SIG" --data-binary "$BODY"     # 200, echoed by the backend
 curl -i localhost:8080/github -H "X-Hub-Signature-256: sha256=$SIG" --data-binary "${BODY}x"  # 401, never forwarded

@@ -17,14 +17,18 @@ import (
 	"github.com/mrrobertkent/hookgate/internal/config"
 )
 
+// MinSecretBytes is the shortest token or HMAC secret accepted. A shorter secret makes its check fail to build,
+// so the source stays not ready instead of verifying with a guessable key.
+const MinSecretBytes = 16
+
 // Verifier is one configured check with its secrets resolved.
 type Verifier interface {
 	// Verify returns nil when the request passes, or a short reason safe to log (never a secret or a signature).
 	Verify(h http.Header, body []byte) error
 }
 
-// Build resolves the secrets of a check. It fails when no usable secret remains, so a source with a missing
-// secret can never verify anything.
+// Build resolves the secrets of a check. It fails when a secret is shorter than MinSecretBytes or no usable
+// secret remains, so a source with a missing or weak secret can never verify anything.
 func Build(c config.Check) (Verifier, error) {
 	switch {
 	case c.Token != nil:
@@ -66,9 +70,13 @@ func resolve(refs []config.SecretRef) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
-		if v != "" {
-			out = append(out, v)
+		if v == "" {
+			continue
 		}
+		if len(v) < MinSecretBytes {
+			return nil, fmt.Errorf("%s is shorter than %d bytes", r, MinSecretBytes)
+		}
+		out = append(out, v)
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("no secret is set")
