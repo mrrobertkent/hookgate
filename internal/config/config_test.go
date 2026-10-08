@@ -83,3 +83,16 @@ func TestSecretRef(t *testing.T) {
 		}
 	}
 }
+
+func TestLoad(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "hookgate.yaml")
+	if err := os.WriteFile(file, []byte(minimal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := Load(file); err != nil || len(c.Sources) != 1 {
+		t.Fatalf("Load = %v, %v", c, err)
+	}
+	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
+		t.Error("Load of a missing file succeeded")
+	}
+}
