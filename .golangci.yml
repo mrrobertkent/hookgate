@@ -1,0 +1,40 @@
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - errcheck
+    - errorlint
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - nolintlint
+    - staticcheck
+    - unused
+  settings:
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    gosec:
+      excludes:
+        - G104 # unchecked errors: errcheck reports them, with the exclusions below
+    misspell:
+      locale: UK
+  exclusions:
+    presets:
+      # Unchecked errors from fmt.Print*, Close and similar on output and read paths: nothing to recover.
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters: [gosec]
+        text: G101
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

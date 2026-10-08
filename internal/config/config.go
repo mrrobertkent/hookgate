@@ -81,7 +81,7 @@ type Forward struct {
 
 // Load reads, defaults and validates a configuration file. Unknown keys are errors.
 func Load(file string) (*Config, error) {
-	raw, err := os.ReadFile(file)
+	raw, err := os.ReadFile(file) //nolint:gosec // G304: the operator chooses the config path.
 	if err != nil {
 		return nil, err
 	}

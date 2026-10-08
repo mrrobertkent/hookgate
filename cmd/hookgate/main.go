@@ -54,7 +54,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return 0
 	case "healthcheck":
 		c := &http.Client{Timeout: 3 * time.Second}
-		resp, err := c.Get(*probeURL)
+		resp, err := c.Get(*probeURL) //nolint:gosec // G704: the operator sets the probe URL; it defaults to loopback.
 		if err != nil {
 			fmt.Fprintln(stderr, err)
 			return 1
