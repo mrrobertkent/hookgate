@@ -16,7 +16,7 @@ func FuzzHMAC(f *testing.F) {
 	f.Add([]byte(`{"a":1}`), "AAAA")
 	f.Add([]byte{}, "")
 	f.Add([]byte("x"), "v1=,v1=zz")
-	f.Setenv("FUZZ_KEY", "fuzz-key")
+	f.Setenv("FUZZ_KEY", "fuzz-signing-key-0123")
 	v, err := Build(config.Check{HMAC: &config.HMACCheck{Header: "X-Sig", Algorithm: "sha256", Encoding: "base64",
 		Separator: ",", Secrets: []config.SecretRef{{Env: "FUZZ_KEY"}}}})
 	if err != nil {
@@ -26,7 +26,7 @@ func FuzzHMAC(f *testing.F) {
 		h := http.Header{}
 		h.Set("X-Sig", sig)
 		if v.Verify(h, body) == nil {
-			want := base64.StdEncoding.EncodeToString(mac(sha256.New, "fuzz-key", string(body)))
+			want := base64.StdEncoding.EncodeToString(mac(sha256.New, "fuzz-signing-key-0123", string(body)))
 			if !containsSig(sig, want) {
 				t.Fatalf("accepted forged signature %q for body %q", sig, body)
 			}

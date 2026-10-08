@@ -62,7 +62,7 @@ func TestForwardsOnlyVerifiedBytes(t *testing.T) {
 	up := &captured{}
 	srv := httptest.NewServer(up.handler(200))
 	defer srv.Close()
-	t.Setenv("E2_TOKEN", "e2-token-value")
+	t.Setenv("E2_TOKEN", "e2-token-value-0123")
 	t.Setenv("E2_SECRET", "e2-signing-secret")
 	t.Setenv("INTERNAL", "internal-bearer")
 	g := newGateway(t, `
@@ -79,7 +79,7 @@ sources:
       set_headers: {Authorization: {env: INTERNAL}}
 `)
 	body := "[{\"a\":1}]\r\n"
-	good := map[string]string{"X-E2-Token": "e2-token-value", "X-Sig": sign("e2-signing-secret", body),
+	good := map[string]string{"X-E2-Token": "e2-token-value-0123", "X-Sig": sign("e2-signing-secret", body),
 		"Content-Type": "application/json", "X-Keep-Me": "1", "X-Drop-Me": "1", "Authorization": "client-sent"}
 
 	if w := post(g, "/e2/events", body, good); w.Code != 200 {
@@ -132,7 +132,7 @@ func TestSourceWithMissingSecretIsIsolated(t *testing.T) {
 	up := &captured{}
 	srv := httptest.NewServer(up.handler(200))
 	defer srv.Close()
-	t.Setenv("OK_TOKEN", "ok-token-value")
+	t.Setenv("OK_TOKEN", "ok-token-value-0123")
 	g := newGateway(t, `
 sources:
   - name: broken
@@ -147,7 +147,7 @@ sources:
 	if w := post(g, "/broken", "{}", map[string]string{"X-T": ""}); w.Code != 503 {
 		t.Errorf("broken source: got %d, want 503", w.Code)
 	}
-	if w := post(g, "/ok", "{}", map[string]string{"X-T": "ok-token-value"}); w.Code != 200 {
+	if w := post(g, "/ok", "{}", map[string]string{"X-T": "ok-token-value-0123"}); w.Code != 200 {
 		t.Errorf("healthy source: got %d, want 200", w.Code)
 	}
 	if len(up.reqs) != 1 || up.reqs[0].URL.Path != "/ok" {
@@ -164,7 +164,7 @@ func TestRetriesNextTargetOn5xxAndTransportError(t *testing.T) {
 	good := &captured{}
 	ok := httptest.NewServer(good.handler(202))
 	defer ok.Close()
-	t.Setenv("T", "token-value")
+	t.Setenv("T", "token-value-0123")
 	g := newGateway(t, `
 sources:
   - name: s
@@ -172,7 +172,7 @@ sources:
     checks: [{token: {header: X-T, secrets: [{env: T}]}}]
     forward: {urls: [`+f.URL+`, `+dead.URL+`, `+ok.URL+`], max_attempts: 3}
 `)
-	if w := post(g, "/s", "{}", map[string]string{"X-T": "token-value"}); w.Code != 202 {
+	if w := post(g, "/s", "{}", map[string]string{"X-T": "token-value-0123"}); w.Code != 202 {
 		t.Fatalf("got %d, want 202 from the third target", w.Code)
 	}
 	if len(failing.reqs) != 1 || len(good.reqs) != 1 {
@@ -184,7 +184,7 @@ func TestUpstream4xxIsFinal(t *testing.T) {
 	up := &captured{}
 	srv := httptest.NewServer(up.handler(401))
 	defer srv.Close()
-	t.Setenv("T", "token-value")
+	t.Setenv("T", "token-value-0123")
 	g := newGateway(t, `
 sources:
   - name: s
@@ -192,7 +192,7 @@ sources:
     checks: [{token: {header: X-T, secrets: [{env: T}]}}]
     forward: {urls: [`+srv.URL+`, `+srv.URL+`]}
 `)
-	if w := post(g, "/s", "{}", map[string]string{"X-T": "token-value"}); w.Code != 401 {
+	if w := post(g, "/s", "{}", map[string]string{"X-T": "token-value-0123"}); w.Code != 401 {
 		t.Fatalf("got %d", w.Code)
 	}
 	if len(up.reqs) != 1 {
