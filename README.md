@@ -76,8 +76,28 @@ curl -i localhost:8080/github -H "X-Hub-Signature-256: sha256=$SIG" --data-binar
 ## Install
 
 - **Container:** `ghcr.io/mrrobertkent/hookgate:<version>` (linux/amd64, linux/arm64). Pin a version or digest in production.
-- **Binary:** download from [Releases](https://github.com/mrrobertkent/hookgate/releases) and check it with `sha256sum -c checksums.txt` or `gh attestation verify <file> --repo mrrobertkent/hookgate`.
+- **Binary:** download from [Releases](https://github.com/mrrobertkent/hookgate/releases) and check it with `sha256sum -c checksums.txt`.
 - **Go:** `go install github.com/mrrobertkent/hookgate/cmd/hookgate@latest`
+
+### Verify a release
+
+Release archives and images carry SLSA build provenance signed with Sigstore; from v0.1.1, `checksums.txt` and the image are also signed with cosign. All signatures are keyless, issued to the release workflow.
+
+```sh
+# archive provenance (also attached to the release as hookgate_<version>.intoto.jsonl)
+gh attestation verify hookgate_<version>_linux_amd64.tar.gz --repo mrrobertkent/hookgate
+
+# checksums signature
+cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/mrrobertkent/hookgate/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# image signature and provenance
+cosign verify ghcr.io/mrrobertkent/hookgate:<version> \
+  --certificate-identity-regexp '^https://github.com/mrrobertkent/hookgate/.github/workflows/release.yml@refs/tags/v' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+gh attestation verify oci://ghcr.io/mrrobertkent/hookgate:<version> --repo mrrobertkent/hookgate
+```
 
 ## Configuration
 
