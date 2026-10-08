@@ -1,0 +1,25 @@
+# docker compose -f docker-compose.yml -f compose.clickhouse.yaml up -d
+services:
+  otel-collector:
+    environment:
+      CLICKHOUSE_USER: otel
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
+    volumes:
+      - ./collector.clickhouse.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      clickhouse: {condition: service_healthy}
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.20.9@sha256:9b61e3c635c04ad5bb521eb4f6e61ce7585b5580814e51c25bb9e8292ce43364
+    environment:
+      CLICKHOUSE_USER: otel
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
+    volumes:
+      - clickhouse:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "otel", "--password", "${CLICKHOUSE_PASSWORD}", "-q", "SELECT 1"]
+      interval: 2s
+      retries: 30
+
+volumes:
+  clickhouse:

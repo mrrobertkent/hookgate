@@ -31,6 +31,25 @@ jobs:
           CLICKHOUSE_USER: webhooks
           CLICKHOUSE_PASSWORD: example-password
         run: go run ./cmd/hookgate validate -config examples/hookgate.yaml
+      - name: Validate the OpenTelemetry Collector example
+        working-directory: examples/otel-collector
+        env:
+          GITHUB_WEBHOOK_SECRET: example-github-secret
+          STORAGE_WEBHOOK_TOKEN: example-token-value
+          STORAGE_SIGNING_SECRET: example-signing-secret
+          UPSTREAM_TOKEN: example-upstream-token
+          UPSTREAM_AUTHORIZATION: Bearer example-upstream-token
+          CLICKHOUSE_USER: otel
+          CLICKHOUSE_PASSWORD: example-password
+        run: |
+          go run ../../cmd/hookgate validate -config hookgate.yaml
+          docker compose -f docker-compose.yml -f compose.clickhouse.yaml config --quiet
+          collector=$(docker compose config --images | grep opentelemetry-collector)
+          for config in collector.yaml collector.clickhouse.yaml; do
+            docker run --rm -e UPSTREAM_TOKEN -e CLICKHOUSE_USER -e CLICKHOUSE_PASSWORD \
+              --tmpfs /var/lib/otelcol/queue -v "$PWD/$config:/etc/otelcol-contrib/config.yaml:ro" \
+              "$collector" validate --config=/etc/otelcol-contrib/config.yaml
+          done
 
   govulncheck:
     runs-on: ubuntu-latest

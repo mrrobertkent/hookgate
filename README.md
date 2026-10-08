@@ -176,7 +176,7 @@ Secrets are always references (`env:` or `file:`), never literals. The full refe
 <details>
 <summary><b>Upstream</b>: OpenTelemetry Collector <code>webhookevent</code> receiver</summary>
 
-Each verified request becomes one log record. Give every source its own receiver and exporter so one sender's backlog never blocks another.
+Each verified request becomes one log record. Give every source its own receiver and exporter so one sender's backlog never blocks another. A runnable deployment with durable per-source queues, a ClickHouse variant and a crash test: [examples/otel-collector](examples/otel-collector/).
 
 ```yaml
 # otel-collector config
@@ -269,7 +269,7 @@ Configure the Vector `http_server` source with `auth` for the same token and `ac
 
 hookgate does one job. It does not:
 
-- **Queue or persist.** The sender gets the upstream's answer. Put a durable upstream behind it (an OpenTelemetry Collector with a persistent queue, ClickHouse, a broker) or rely on the sender's retries.
+- **Queue or persist.** The sender gets the upstream's answer. Put a durable upstream behind it (an [OpenTelemetry Collector with a persistent queue](examples/otel-collector/), ClickHouse, a broker) or rely on the sender's retries.
 - **Check timestamps or deduplicate.** Schemes that sign a timestamp (Stripe, Slack, Standard Webhooks) are not supported yet.
 - **Verify public-key or JWT signatures** (Discord, SendGrid, SNS) or answer subscription handshakes.
 - **Terminate TLS.** Run it behind your reverse proxy.

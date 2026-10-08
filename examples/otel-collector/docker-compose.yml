@@ -1,0 +1,34 @@
+name: hookgate-otel
+
+services:
+  hookgate:
+    image: ghcr.io/mrrobertkent/hookgate:0.1.1@sha256:e4169366c91182963595b759cafd74a9c7f8f03365121e3d4b97e834cbfed59e
+    ports: ["8080:8080"]
+    environment:
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?}
+      STORAGE_WEBHOOK_TOKEN: ${STORAGE_WEBHOOK_TOKEN:?}
+      STORAGE_SIGNING_SECRET: ${STORAGE_SIGNING_SECRET:?}
+      UPSTREAM_AUTHORIZATION: Bearer ${UPSTREAM_TOKEN:?}
+    volumes:
+      - ./hookgate.yaml:/etc/hookgate/hookgate.yaml:ro
+    depends_on: [otel-collector]
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.162.0@sha256:39923a8e431bd1f57be82411999d389fcfe40857492e4365456d97a4c1f74be6
+    environment:
+      UPSTREAM_TOKEN: ${UPSTREAM_TOKEN:?}
+    volumes:
+      - ./collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - queue:/var/lib/otelcol/queue
+    depends_on:
+      queue-permissions: {condition: service_completed_successfully}
+
+  # The collector runs as uid 10001; a new named volume is owned by root.
+  queue-permissions:
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    command: chown 10001:10001 /queue
+    volumes:
+      - queue:/queue
+
+volumes:
+  queue:
