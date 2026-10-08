@@ -1,0 +1,40 @@
+listen: ":8080"
+admin_listen: ":9090"
+
+sources:
+  # GitHub-style: hex HMAC-SHA256 with a "sha256=" prefix.
+  - name: github
+    path: /github
+    checks:
+      - hmac:
+          header: X-Hub-Signature-256
+          algorithm: sha256
+          encoding: hex
+          prefix: "sha256="
+          secrets: [{env: GITHUB_WEBHOOK_SECRET}]
+    forward:
+      urls: ["http://otel-collector:8088/github"]
+      resolve_all: true
+      pass_headers: [Content-Type, X-GitHub-*]
+      set_headers:
+        Authorization: {env: UPSTREAM_AUTHORIZATION}
+
+  # Object-storage notifications: a static token plus a base64 HMAC-SHA256 of the body.
+  - name: storage
+    path: /storage/events
+    max_body_bytes: 262144
+    checks:
+      - token:
+          header: X-Webhook-Token
+          secrets: [{env: STORAGE_WEBHOOK_TOKEN}]
+      - hmac:
+          header: X-Notification-Signature
+          algorithm: sha256
+          encoding: base64
+          secrets: [{env: STORAGE_SIGNING_SECRET}]
+    forward:
+      urls: ["http://otel-collector:8089/storage/events"]
+      resolve_all: true
+      pass_headers: [Content-Type]
+      set_headers:
+        Authorization: {env: UPSTREAM_AUTHORIZATION}

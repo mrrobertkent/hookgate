@@ -1,0 +1,45 @@
+extensions:
+  bearertokenauth/hookgate:
+    token: ${env:UPSTREAM_TOKEN}
+  file_storage/queue:
+    directory: /var/lib/otelcol/queue
+    fsync: true                   # a 200 means the event is on disk, not in the page cache
+    compaction:
+      on_start: true
+      directory: /var/lib/otelcol/queue
+
+receivers:
+  webhook_event/github:
+    endpoint: 0.0.0.0:8088
+    path: /github
+    write_timeout: 5s
+    header_attribute_regex: "(?i)^x-github-(event|delivery)$"
+    auth: {authenticator: bearertokenauth/hookgate}
+  webhook_event/storage:
+    endpoint: 0.0.0.0:8089
+    path: /storage/events
+    write_timeout: 5s
+    auth: {authenticator: bearertokenauth/hookgate}
+
+exporters:
+  # One exporter, and so one queue, per source: a backlog in one never delays the other.
+  debug/github:
+    verbosity: detailed
+    sending_queue:
+      storage: file_storage/queue
+      queue_size: 10000
+  debug/storage:
+    verbosity: detailed
+    sending_queue:
+      storage: file_storage/queue
+      queue_size: 10000
+
+service:
+  extensions: [bearertokenauth/hookgate, file_storage/queue]
+  pipelines:
+    logs/github:
+      receivers: [webhook_event/github]
+      exporters: [debug/github]
+    logs/storage:
+      receivers: [webhook_event/storage]
+      exporters: [debug/storage]
