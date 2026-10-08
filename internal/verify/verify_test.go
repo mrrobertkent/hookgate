@@ -15,6 +15,11 @@ import (
 	"github.com/mrrobertkent/hookgate/internal/config"
 )
 
+const (
+	key1 = "first-signing-key-0123"
+	key2 = "second-signing-key-456"
+)
+
 func mac(h func() hash.Hash, key, body string) []byte {
 	m := hmac.New(h, []byte(key))
 	m.Write([]byte(body))
@@ -23,7 +28,7 @@ func mac(h func() hash.Hash, key, body string) []byte {
 
 func hdr(kv ...string) http.Header {
 	h := http.Header{}
-	for i := 0; i < len(kv); i += 2 {
+	for i := 0; i+1 < len(kv); i += 2 {
 		h.Add(kv[i], kv[i+1])
 	}
 	return h
@@ -32,7 +37,7 @@ func hdr(kv ...string) http.Header {
 func envRefs(t *testing.T, kv ...string) []config.SecretRef {
 	t.Helper()
 	var refs []config.SecretRef
-	for i := 0; i < len(kv); i += 2 {
+	for i := 0; i+1 < len(kv); i += 2 {
 		t.Setenv(kv[i], kv[i+1])
 		refs = append(refs, config.SecretRef{Env: kv[i], Optional: i > 0})
 	}
@@ -79,6 +84,29 @@ func TestMissingSecretFailsClosed(t *testing.T) {
 	}
 }
 
+func TestShortSecretFailsClosed(t *testing.T) {
+	t.Setenv("SHORT", "fifteen-bytes!!")
+	t.Setenv("LONG", "sixteen-bytes!!!")
+	short := []config.SecretRef{{Env: "SHORT"}}
+	for _, c := range []config.Check{
+		{Token: &config.TokenCheck{Header: "X-Token", Secrets: short}},
+		{HMAC: &config.HMACCheck{Header: "X-Sig", Algorithm: "sha256", Encoding: "hex", Secrets: short}},
+		{HMAC: &config.HMACCheck{Header: "X-Sig", Algorithm: "sha256", Encoding: "hex",
+			Secrets: []config.SecretRef{{Env: "LONG"}, {Env: "SHORT", Optional: true}}}},
+	} {
+		_, err := Build(c)
+		if err == nil {
+			t.Fatalf("Build(%+v) accepted a 15-byte secret", c)
+		}
+		if !strings.Contains(err.Error(), "env:SHORT") || strings.Contains(err.Error(), "fifteen-bytes") {
+			t.Errorf("error must name the reference and never the value: %v", err)
+		}
+	}
+	if _, err := Build(config.Check{Token: &config.TokenCheck{Header: "X-Token", Secrets: []config.SecretRef{{Env: "LONG"}}}}); err != nil {
+		t.Errorf("16-byte secret rejected: %v", err)
+	}
+}
+
 func TestHMAC(t *testing.T) {
 	body := `[{"eventName":"s3:ObjectCreated:Put"}]` + "\r\n"
 	type tc struct {
@@ -88,9 +116,9 @@ func TestHMAC(t *testing.T) {
 		body string
 		ok   bool
 	}
-	b64 := base64.StdEncoding.EncodeToString(mac(sha256.New, "k1", body))
-	b64next := base64.StdEncoding.EncodeToString(mac(sha256.New, "k2", body))
-	hx := hex.EncodeToString(mac(sha256.New, "k1", body))
+	b64 := base64.StdEncoding.EncodeToString(mac(sha256.New, key1, body))
+	b64next := base64.StdEncoding.EncodeToString(mac(sha256.New, key2, body))
+	hx := hex.EncodeToString(mac(sha256.New, key1, body))
 	e2 := config.HMACCheck{Header: "X-Sig", Algorithm: "sha256", Encoding: "base64"}
 	gh := config.HMACCheck{Header: "X-Sig", Algorithm: "sha256", Encoding: "hex", Prefix: "sha256="}
 	multi := config.HMACCheck{Header: "X-Sig", Algorithm: "sha256", Encoding: "hex", Prefix: "v1=", Separator: ","}
@@ -105,12 +133,12 @@ func TestHMAC(t *testing.T) {
 		{"hex missing prefix", gh, hx, body, false},
 		{"multi second matches", multi, "v1=00ff,v1=" + hx, body, true},
 		{"multi none match", multi, "v1=00ff,v0=" + hx, body, false},
-		{"sha1", config.HMACCheck{Header: "X-Sig", Algorithm: "sha1", Encoding: "hex"}, hex.EncodeToString(mac(sha1.New, "k1", body)), body, true},
-		{"sha512 base64url", config.HMACCheck{Header: "X-Sig", Algorithm: "sha512", Encoding: "base64url"}, base64.RawURLEncoding.EncodeToString(mac(sha512.New, "k1", body)), body, true},
+		{"sha1", config.HMACCheck{Header: "X-Sig", Algorithm: "sha1", Encoding: "hex"}, hex.EncodeToString(mac(sha1.New, key1, body)), body, true},
+		{"sha512 base64url", config.HMACCheck{Header: "X-Sig", Algorithm: "sha512", Encoding: "base64url"}, base64.RawURLEncoding.EncodeToString(mac(sha512.New, key1, body)), body, true},
 		{"empty signature", e2, "", body, false},
 	}
-	t.Setenv("K1", "k1")
-	t.Setenv("K2", "k2")
+	t.Setenv("K1", key1)
+	t.Setenv("K2", key2)
 	for _, c := range cases {
 		c.cfg.Secrets = []config.SecretRef{{Env: "K1"}, {Env: "K2", Optional: true}}
 		v, err := Build(config.Check{HMAC: &c.cfg})

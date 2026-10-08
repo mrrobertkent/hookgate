@@ -100,6 +100,7 @@ func (f *forwarder) targets(ctx context.Context) []*url.URL {
 			out = append(out, u)
 			continue
 		}
+		//nolint:gosec // G404: spreads attempts across upstream instances; not a security decision.
 		rand.Shuffle(len(addrs), func(i, j int) { addrs[i], addrs[j] = addrs[j], addrs[i] })
 		for _, a := range addrs {
 			v := *u

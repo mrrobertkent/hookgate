@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+tone_instructions: "Concise and technical. No praise or summaries of unchanged code. Lead with security and correctness; mark style points as nitpicks."
+reviews:
+  profile: chill
+  poem: false
+  in_progress_fortune: false
+  auto_review:
+    enabled: true
+    drafts: false
+    ignore_usernames: ["dependabot[bot]"]
+  path_filters:
+    - "!go.sum"
+    - "!dist/**"
+    - "!**/*.png"
+  path_instructions:
+    - path: "internal/verify/**"
+      instructions: |
+        Signature and token verification; treat every change as security-sensitive.
+        - Secret-dependent comparisons must be constant time (hmac.Equal, crypto/subtle on fixed-size digests). Flag ==, bytes.Equal, early returns or length checks that leak secret or signature data through timing.
+        - The HMAC is computed over the raw body bytes exactly as received: no trimming, decoding, re-encoding, JSON parsing or normalisation before verification.
+        - Error strings are logged: they may name headers but must never contain secrets, signatures, computed MACs or body content.
+        - Every check fails closed: a missing, repeated or malformed header, an unknown encoding or an unresolved secret is a rejection, never a pass.
+        - New parsing paths need unit tests and fuzz coverage (FuzzHMAC).
+    - path: "internal/gateway/**"
+      instructions: |
+        - The body is read through http.MaxBytesReader before any verification, and only bytes that passed every check are forwarded, unchanged.
+        - Only allowlisted headers (pass_headers) and configured set_headers reach the upstream; sender credentials must never be forwarded.
+        - Nothing is forwarded for a not-ready source or a failed check. Retries go only to transport errors and 5xx.
+        - Check timeouts, bounded reads of upstream responses, goroutine and connection leaks, and graceful shutdown (drain_delay, shutdown_timeout).
+        - Logs and metrics never carry secrets, signatures or bodies; metric labels stay low-cardinality (source names, fixed outcomes).
+    - path: "internal/config/**"
+      instructions: |
+        Unknown keys stay errors. Secrets are references (env or file), never literals; validation errors name the reference, never the value. New keys need defaults, validation and an entry in docs/configuration.md.
+    - path: ".github/workflows/**"
+      instructions: |
+        Actions pinned to full commit SHAs with a version comment; top-level permissions read-only, write scopes per job only where needed; no pull_request_target that checks out or runs PR code; no untrusted input interpolated into run scripts.
+    - path: "examples/**"
+      instructions: |
+        Images pinned by version and digest; no real secrets; every documented command must work as written.
+  tools:
+    golangci-lint:
+      enabled: false
