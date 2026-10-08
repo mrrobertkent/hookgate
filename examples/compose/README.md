@@ -1,6 +1,6 @@
 # hookgate with Docker Compose
 
-A single hookgate container with a pinned image, a health check, a restart policy, a read-only filesystem and no capabilities. The webhook port is published; the admin port (`/healthz`, `/readyz`, `/metrics`) is bound to loopback only.
+A single hookgate container with a pinned image, a health check, a restart policy, a read-only filesystem and no capabilities. Both ports bind to loopback only: the webhook port for a TLS-terminating reverse proxy on the host, the admin port (`/healthz`, `/readyz`, `/metrics`) for local scraping. A proxy running as a container on the same network reaches `hookgate:8080` without any published port.
 
 | File | Purpose |
 |---|---|
@@ -35,7 +35,7 @@ curl -s localhost:9090/metrics | grep hookgate_requests_total
 2. Put every secret in `.env` and reference it under `environment:` in `compose.yaml`. Keep `.env` out of version control.
 3. Check the file before deploying: `docker compose run --rm hookgate validate`.
 4. Start without the stand-in backend: `docker compose up -d --wait`.
-5. Terminate TLS in your reverse proxy and route the webhook paths to port `8080`. Scrape `/metrics` from the host or a sidecar on the same network.
+5. Terminate TLS in your reverse proxy and route the webhook paths to `127.0.0.1:8080` (or `hookgate:8080` from a proxy container on the same network). Scrape `/metrics` from the host or a container on the same network.
 
 Upgrade by changing the image tag and digest, then `docker compose up -d --wait`. On stop, hookgate keeps serving for `drain_delay` and then gives in-flight requests up to `shutdown_timeout` (30 s by default); `stop_grace_period` stays above their sum.
 

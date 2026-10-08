@@ -5,7 +5,7 @@ services:
     image: ghcr.io/mrrobertkent/hookgate:0.1.1@sha256:e4169366c91182963595b759cafd74a9c7f8f03365121e3d4b97e834cbfed59e
     restart: unless-stopped
     ports:
-      - "8080:8080"               # webhooks; put your TLS-terminating reverse proxy in front
+      - "127.0.0.1:8080:8080"     # webhooks, for a reverse proxy on the host; proxy containers use hookgate:8080
       - "127.0.0.1:9090:9090"     # /healthz, /readyz, /metrics: loopback only
     environment:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?set it in .env}
