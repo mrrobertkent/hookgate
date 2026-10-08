@@ -1,0 +1,18 @@
+listen: ":8080"
+admin_listen: ":9090"
+drain_delay: 10s
+
+sources:
+  - name: github
+    path: /github
+    checks:
+      - hmac:
+          header: X-Hub-Signature-256
+          algorithm: sha256
+          encoding: hex
+          prefix: "sha256="
+          secrets:
+            - env: GITHUB_WEBHOOK_SECRET
+    forward:
+      urls: ["http://backend:80/"]   # your upstream
+      pass_headers: [Content-Type, X-GitHub-*]
