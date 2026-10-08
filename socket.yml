@@ -1,0 +1,14 @@
+version: 2
+
+# Socket ingests package manifests only: go.mod and go.sum, plus the workflows under .github/workflows
+# (GitHub Actions support is experimental). Container images in the Dockerfile and the example compose
+# files are not ingested; Dependabot keeps their digest pins current.
+projectIgnorePaths:
+  - "dist"
+
+githubApp:
+  enabled: true
+  pullRequestAlertsEnabled: true
+  dependencyOverviewEnabled: true
+  projectReportsEnabled: true
+  disableCommentsAndCheckRuns: false
