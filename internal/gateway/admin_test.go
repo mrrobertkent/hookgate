@@ -18,7 +18,7 @@ func TestAdminAndMetrics(t *testing.T) {
 	up := &captured{}
 	srv := httptest.NewServer(up.handler(200))
 	defer srv.Close()
-	t.Setenv("T", "token-value")
+	t.Setenv("T", "token-value-0123")
 	g := newGateway(t, `
 sources:
   - name: s
@@ -30,7 +30,7 @@ sources:
     checks: [{token: {header: X-T, secrets: [{env: MISSING_FOR_TEST}]}}]
     forward: {urls: [`+srv.URL+`]}
 `)
-	post(g, "/s", "{}", map[string]string{"X-T": "token-value"})
+	post(g, "/s", "{}", map[string]string{"X-T": "token-value-0123"})
 	post(g, "/s", "{}", map[string]string{"X-T": "wrong"})
 
 	admin := g.Admin()
@@ -79,7 +79,7 @@ func TestRunDrains(t *testing.T) {
 	up := &captured{}
 	srv := httptest.NewServer(up.handler(200))
 	defer srv.Close()
-	t.Setenv("T", "token-value")
+	t.Setenv("T", "token-value-0123")
 	addr, adminAddr := freePort(t), freePort(t)
 	cfg, err := config.Parse([]byte(`
 listen: "` + addr + `"
@@ -102,7 +102,7 @@ sources:
 
 	send := func() (int, error) {
 		req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/s", strings.NewReader("{}"))
-		req.Header.Set("X-T", "token-value")
+		req.Header.Set("X-T", "token-value-0123")
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			return 0, err
