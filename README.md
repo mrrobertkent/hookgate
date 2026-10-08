@@ -6,8 +6,6 @@
 
 # hookgate
 
-**Verify every webhook. Forward only the real ones.**
-
 hookgate is a lightweight webhook gateway: a single static binary that checks each incoming webhook against its sender's signature or token and forwards only authentic requests, byte for byte, to your OpenTelemetry Collector, ClickHouse, Vector or any HTTP backend.
 
 [Configuration](docs/configuration.md) · [Releases](https://github.com/mrrobertkent/hookgate/releases) · [Example](examples/hookgate.yaml) · [Security](SECURITY.md)
