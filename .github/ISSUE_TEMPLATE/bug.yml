@@ -1,0 +1,20 @@
+name: Bug report
+description: hookgate behaves differently from its documentation.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes: {label: hookgate version, description: Output of `hookgate version`.}
+    validations: {required: true}
+  - type: textarea
+    id: config
+    attributes: {label: Configuration, description: The relevant source, with secrets removed., render: yaml}
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes: {label: What happened, description: The request you sent, the response, and hookgate's log line.}
+    validations: {required: true}
+  - type: textarea
+    id: expected
+    attributes: {label: What you expected}
+    validations: {required: true}

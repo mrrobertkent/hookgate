@@ -1,0 +1,4 @@
+/hookgate
+/dist/
+coverage.out
+*.test

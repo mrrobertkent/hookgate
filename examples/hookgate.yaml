@@ -1,0 +1,49 @@
+# hookgate example: two senders, each verified its own way, forwarded to an OpenTelemetry Collector
+# webhook receiver and to ClickHouse's HTTP interface.
+listen: ":8080"
+admin_listen: ":9090"
+drain_delay: 20s          # keep serving after SIGTERM while the load balancer stops routing here
+
+sources:
+  # Object-storage notifications: a static header plus a base64 HMAC-SHA256 of the raw body.
+  - name: storage
+    path: /storage/events
+    max_body_bytes: 262144
+    checks:
+      - token:
+          header: X-Webhook-Token
+          secrets:
+            - env: E2_WEBHOOK_TOKEN
+      - hmac:
+          header: X-Notification-Signature
+          algorithm: sha256
+          encoding: base64
+          secrets:
+            - env: E2_SIGNING_SECRET
+            - env: E2_SIGNING_SECRET_NEXT   # set during a rotation; both keys verify until the old one is removed
+              optional: true
+    forward:
+      urls: ["http://otel-collector:8088/storage/events"]
+      resolve_all: true                     # try every address behind the name, in random order
+      pass_headers: [Content-Type]
+      set_headers:
+        Authorization: {env: UPSTREAM_TOKEN}
+
+  # GitHub: hex HMAC-SHA256 with a "sha256=" prefix in X-Hub-Signature-256.
+  - name: github
+    path: /github
+    checks:
+      - hmac:
+          header: X-Hub-Signature-256
+          algorithm: sha256
+          encoding: hex
+          prefix: "sha256="
+          secrets:
+            - env: GITHUB_WEBHOOK_SECRET
+    forward:
+      # ClickHouse stores each verified body as one row (see the README recipe for the table).
+      urls: ["http://clickhouse:8123/?query=INSERT%20INTO%20webhooks.github%20(body)%20FORMAT%20RawBLOB"]
+      pass_headers: [Content-Type, X-GitHub-*]
+      set_headers:
+        X-ClickHouse-User: {env: CLICKHOUSE_USER}
+        X-ClickHouse-Key: {env: CLICKHOUSE_PASSWORD}
