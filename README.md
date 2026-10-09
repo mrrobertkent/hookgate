@@ -1,7 +1,7 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset=".github/banner-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset=".github/banner-light.png">
-  <img alt="hookgate: a gate with a green check mark lets verified webhook requests through. Verify every webhook. Forward only the real ones." src=".github/banner-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset=".github/assets/banner-dark.png">
+  <img alt="hookgate — Your traffic. Your rules. Open-source ingress gateway: webhook, API and database sources flow through hookgate to storage and metrics backends." src=".github/assets/banner-dark.png">
 </picture>
 
 # hookgate
