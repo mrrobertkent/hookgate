@@ -17,6 +17,7 @@ hookgate is a lightweight webhook gateway: a single static binary that checks ea
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=mrrobertkent_hookgate&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=mrrobertkent_hookgate)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/mrrobertkent/hookgate/badge)](https://scorecard.dev/viewer/?uri=github.com/mrrobertkent/hookgate)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/15295/badge)](https://www.bestpractices.dev/projects/15295)
+[![OpenSSF Baseline](https://www.bestpractices.dev/projects/15295/baseline)](https://www.bestpractices.dev/projects/15295)
 [![Container](https://img.shields.io/badge/ghcr.io-mrrobertkent%2Fhookgate-blue?logo=docker)](https://github.com/mrrobertkent/hookgate/pkgs/container/hookgate)
 
 ## Why hookgate
