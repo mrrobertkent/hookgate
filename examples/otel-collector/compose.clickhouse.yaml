@@ -10,7 +10,7 @@ services:
       clickhouse: {condition: service_healthy}
 
   clickhouse:
-    image: clickhouse/clickhouse-server:26.9.11.2@sha256:cdc54a9494fdf608b48c240a62b8101a56e781aa94208cbcd7cf095238e5cb90
+    image: clickhouse/clickhouse-server:26.9.19.9@sha256:bdb5c911a23d92fd364e246ab20b5a0a485f00112f3663fa626b083fb46c146b
     environment:
       CLICKHOUSE_USER: otel
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?}
