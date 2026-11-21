@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, site-docker]
     permissions:
       contents: write        # create the GitHub release
       packages: write        # push to ghcr.io
