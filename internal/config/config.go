@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -30,13 +31,14 @@ type Config struct {
 
 // Source is one webhook sender: where it posts, how it proves itself, and where verified requests go.
 type Source struct {
-	Name         string  `yaml:"name"`
-	Path         string  `yaml:"path"`
-	MaxBodyBytes int64   `yaml:"max_body_bytes"`
-	AllowQuery   bool    `yaml:"allow_query"`
-	RejectStatus int     `yaml:"reject_status"`
-	Checks       []Check `yaml:"checks"`
-	Forward      Forward `yaml:"forward"`
+	Name         string   `yaml:"name"`
+	Hosts        HostList `yaml:"hosts"` // exact names; none matches any host
+	Path         string   `yaml:"path"`
+	MaxBodyBytes int64    `yaml:"max_body_bytes"`
+	AllowQuery   bool     `yaml:"allow_query"`
+	RejectStatus int      `yaml:"reject_status"`
+	Checks       []Check  `yaml:"checks"`
+	Forward      Forward  `yaml:"forward"`
 }
 
 // Check is one verification step; exactly one of its fields is set. All checks of a source must pass.
@@ -96,6 +98,9 @@ func Parse(raw []byte) (*Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	if err := rejectNullHosts(raw); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
 	c.applyDefaults()
 	if err := c.validate(); err != nil {
 		return nil, err
@@ -147,91 +152,157 @@ func (c *Config) applyDefaults() {
 
 func (c *Config) validate() error {
 	var errs []error
-	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
-
 	if c.MaxConcurrent < 1 {
-		add("max_concurrent must be >= 1")
+		errs = append(errs, errors.New("max_concurrent must be >= 1"))
 	}
 	if len(c.Sources) == 0 {
-		add("at least one source is required")
+		errs = append(errs, errors.New("at least one source is required"))
 	}
-	names, paths := map[string]bool{}, map[string]bool{}
-	for i, s := range c.Sources {
+	names := map[string]bool{}
+	routes := map[route]string{}
+	for i := range c.Sources {
+		s := &c.Sources[i]
 		where := fmt.Sprintf("sources[%d]", i)
-		if s.Name == "" {
-			add("%s: name is required", where)
-		} else {
+		if s.Name != "" {
 			where = fmt.Sprintf("source %q", s.Name)
 		}
-		if names[s.Name] {
-			add("%s: duplicate name", where)
-		}
-		names[s.Name] = true
-		if !strings.HasPrefix(s.Path, "/") || path.Clean(s.Path) != s.Path {
-			add("%s: path must be an absolute, clean URL path", where)
-		}
-		if paths[s.Path] {
-			add("%s: duplicate path %s", where, s.Path)
-		}
-		paths[s.Path] = true
-		if s.MaxBodyBytes < 1 {
-			add("%s: max_body_bytes must be >= 1", where)
-		}
-		if s.RejectStatus < 200 || s.RejectStatus > 599 {
-			add("%s: reject_status must be an HTTP status code", where)
-		}
-		if len(s.Checks) == 0 {
-			add("%s: at least one check is required (a source never forwards unverified requests)", where)
-		}
-		for j, ch := range s.Checks {
-			cw := fmt.Sprintf("%s checks[%d]", where, j)
-			switch {
-			case ch.Token != nil && ch.HMAC != nil, ch.Token == nil && ch.HMAC == nil:
-				add("%s: set exactly one of token, hmac", cw)
-			case ch.Token != nil:
-				if ch.Token.Header == "" {
-					add("%s: token.header is required", cw)
-				}
-				errs = append(errs, validateSecrets(cw+" token", ch.Token.Secrets)...)
-			case ch.HMAC != nil:
-				h := ch.HMAC
-				if h.Header == "" {
-					add("%s: hmac.header is required", cw)
-				}
-				switch h.Algorithm {
-				case "sha1", "sha256", "sha512":
-				default:
-					add("%s: hmac.algorithm must be sha1, sha256 or sha512", cw)
-				}
-				switch h.Encoding {
-				case "hex", "base64", "base64url":
-				default:
-					add("%s: hmac.encoding must be hex, base64 or base64url", cw)
-				}
-				errs = append(errs, validateSecrets(cw+" hmac", h.Secrets)...)
-			}
-		}
-		f := s.Forward
-		if len(f.URLs) == 0 {
-			add("%s: forward.urls is required", where)
-		}
-		for _, u := range f.URLs {
-			pu, err := url.Parse(u)
-			if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
-				add("%s: forward url %q must be an absolute http(s) URL", where, u)
-			}
-		}
-		for name, ref := range f.SetHeaders {
-			errs = append(errs, validateSecrets(fmt.Sprintf("%s forward.set_headers[%s]", where, name), []SecretRef{ref})...)
-		}
-		if f.AttemptTimeout <= 0 || f.Timeout < f.AttemptTimeout {
-			add("%s: forward timeouts must satisfy 0 < attempt_timeout <= timeout", where)
-		}
-		if f.MaxAttempts < 1 {
-			add("%s: forward.max_attempts must be >= 1", where)
-		}
+		errs = append(errs, validateName(where, s.Name, names)...)
+		errs = append(errs, s.validateRoutes(where, routes)...)
+		errs = append(errs, s.validate(where)...)
 	}
 	return errors.Join(errs...)
+}
+
+// route is one (host, path) pair a source answers; an empty host stands for the source without hosts.
+type route struct{ host, path string }
+
+var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
+
+func validateName(where, name string, seen map[string]bool) []error {
+	var errs []error
+	switch {
+	case name == "":
+		errs = append(errs, fmt.Errorf("%s: name is required", where))
+	case !nameRE.MatchString(name):
+		errs = append(errs, fmt.Errorf("%s: name must match %s", where, nameRE))
+	case seen[name]:
+		errs = append(errs, fmt.Errorf("%s: duplicate name", where))
+	}
+	seen[name] = true
+	return errs
+}
+
+// validateRoutes checks the path and hosts, replaces each host with its normal form, and claims every
+// (host, path) pair in claimed, which maps a pair to the source that holds it.
+func (s *Source) validateRoutes(where string, claimed map[route]string) []error {
+	var errs []error
+	if !strings.HasPrefix(s.Path, "/") || path.Clean(s.Path) != s.Path {
+		errs = append(errs, fmt.Errorf("%s: path must be an absolute, clean URL path", where))
+	}
+	claim := func(r route) {
+		if owner, ok := claimed[r]; ok {
+			errs = append(errs, duplicateRoute(where, r, owner))
+			return
+		}
+		claimed[r] = s.Name
+	}
+	if len(s.Hosts) == 0 {
+		claim(route{path: s.Path})
+	}
+	for k, h := range s.Hosts {
+		n, err := NormalizeHost(h)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: hosts[%d]: %w", where, k, err))
+			continue
+		}
+		s.Hosts[k] = n
+		claim(route{host: n, path: s.Path})
+	}
+	return errs
+}
+
+func duplicateRoute(where string, r route, owner string) error {
+	if r.host == "" {
+		return fmt.Errorf("%s: path %s without hosts is already used by source %q", where, r.path, owner)
+	}
+	return fmt.Errorf("%s: host %s on path %s is already used by source %q", where, r.host, r.path, owner)
+}
+
+func (s *Source) validate(where string) []error {
+	var errs []error
+	if s.MaxBodyBytes < 1 {
+		errs = append(errs, fmt.Errorf("%s: max_body_bytes must be >= 1", where))
+	}
+	if s.RejectStatus < 200 || s.RejectStatus > 599 {
+		errs = append(errs, fmt.Errorf("%s: reject_status must be an HTTP status code", where))
+	}
+	if len(s.Checks) == 0 {
+		errs = append(errs, fmt.Errorf("%s: at least one check is required (a source never forwards unverified requests)", where))
+	}
+	for j, ch := range s.Checks {
+		errs = append(errs, ch.validate(fmt.Sprintf("%s checks[%d]", where, j))...)
+	}
+	return append(errs, s.Forward.validate(where)...)
+}
+
+func (ch Check) validate(where string) []error {
+	switch {
+	case ch.Token != nil && ch.HMAC != nil, ch.Token == nil && ch.HMAC == nil:
+		return []error{fmt.Errorf("%s: set exactly one of token, hmac", where)}
+	case ch.Token != nil:
+		return ch.Token.validate(where)
+	default:
+		return ch.HMAC.validate(where)
+	}
+}
+
+func (t *TokenCheck) validate(where string) []error {
+	var errs []error
+	if t.Header == "" {
+		errs = append(errs, fmt.Errorf("%s: token.header is required", where))
+	}
+	return append(errs, validateSecrets(where+" token", t.Secrets)...)
+}
+
+func (h *HMACCheck) validate(where string) []error {
+	var errs []error
+	if h.Header == "" {
+		errs = append(errs, fmt.Errorf("%s: hmac.header is required", where))
+	}
+	switch h.Algorithm {
+	case "sha1", "sha256", "sha512":
+	default:
+		errs = append(errs, fmt.Errorf("%s: hmac.algorithm must be sha1, sha256 or sha512", where))
+	}
+	switch h.Encoding {
+	case "hex", "base64", "base64url":
+	default:
+		errs = append(errs, fmt.Errorf("%s: hmac.encoding must be hex, base64 or base64url", where))
+	}
+	return append(errs, validateSecrets(where+" hmac", h.Secrets)...)
+}
+
+func (f *Forward) validate(where string) []error {
+	var errs []error
+	if len(f.URLs) == 0 {
+		errs = append(errs, fmt.Errorf("%s: forward.urls is required", where))
+	}
+	for _, u := range f.URLs {
+		pu, err := url.Parse(u)
+		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+			errs = append(errs, fmt.Errorf("%s: forward url %q must be an absolute http(s) URL", where, u))
+		}
+	}
+	for name, ref := range f.SetHeaders {
+		errs = append(errs, validateSecrets(fmt.Sprintf("%s forward.set_headers[%s]", where, name), []SecretRef{ref})...)
+	}
+	if f.AttemptTimeout <= 0 || f.Timeout < f.AttemptTimeout {
+		errs = append(errs, fmt.Errorf("%s: forward timeouts must satisfy 0 < attempt_timeout <= timeout", where))
+	}
+	if f.MaxAttempts < 1 {
+		errs = append(errs, fmt.Errorf("%s: forward.max_attempts must be >= 1", where))
+	}
+	return errs
 }
 
 func validateSecrets(where string, refs []SecretRef) []error {

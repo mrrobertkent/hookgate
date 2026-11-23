@@ -15,6 +15,7 @@ Requires Go (the version in `go.mod`).
 ```sh
 go test -race ./...
 go test -run='^$' -fuzz=FuzzHMAC -fuzztime=30s ./internal/verify
+go test -run='^$' -fuzz=FuzzHost -fuzztime=30s ./internal/gateway
 go vet ./...
 gofmt -l .
 golangci-lint run   # version pinned in .github/workflows/ci.yml
