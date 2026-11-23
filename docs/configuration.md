@@ -77,6 +77,37 @@ Verifies a keyed hash of the raw request body.
 
 The request passes when any signature in the header matches the HMAC of the body under any secret. Hex is case-insensitive.
 
+### `standard_webhooks` check
+
+Verifies a [Standard Webhooks](https://github.com/standard-webhooks/standard-webhooks/blob/main/spec/standard-webhooks.md) signature, as sent by Svix and the services built on it.
+
+```yaml
+- standard_webhooks:
+    headers: svix         # standard (default) | svix
+    tolerance: 5m         # default 5m
+    secrets:
+      - env: WEBHOOK_SECRET
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `headers` | `standard` | Header family: `standard` reads `webhook-id`, `webhook-timestamp`, `webhook-signature`; `svix` reads `svix-id`, `svix-timestamp`, `svix-signature`. Only the configured family is read. |
+| `tolerance` | `5m` | Largest accepted distance between `*-timestamp` and the gateway's clock, in either direction; must be > 0 and at most `1h`. |
+| `secrets` | required | Signing secrets as the sender shows them: standard base64, with or without the `whsec_` prefix. |
+
+The request passes when:
+
+- each of the three headers appears exactly once;
+- the timestamp is Unix seconds in canonical decimal form (digits only, no sign, no leading zero) and within `tolerance`;
+- any `v1,<base64>` entry of the space-separated signature header equals the HMAC-SHA256, under any secret, of `<id>.<timestamp>.<body>` (the id and timestamp exactly as received, the raw body). Entries of other versions are ignored;
+- the id is 1 to 200 bytes of `A-Z a-z 0-9 _ ~ = + -` (no `.`, which separates the signed parts).
+
+The timestamp check limits replays to the tolerance window; it keeps no state, so a request replayed inside the window passes again. A source can have at most one `standard_webhooks` check.
+
+A secret that is not valid standard base64 (padding included) or decodes to fewer than 24 bytes makes its source not ready, like a missing secret.
+
+Give every source its own secret, as the specification requires: a secret shared by two sources lets a request signed for one pass on the other.
+
 ### Secrets
 
 Every secret is a reference, never a literal:
@@ -88,7 +119,7 @@ secrets:
     optional: true                 # may be unset or missing
 ```
 
-Token and HMAC secrets must be at least 16 bytes; use a random value such as `openssl rand -hex 32`. A shorter secret, optional or not, makes its source not ready, and the error names the reference, never the value.
+Token and HMAC secrets must be at least 16 bytes (`standard_webhooks` secrets: 24 decoded bytes); use a random value such as `openssl rand -hex 32`. A shorter secret, optional or not, makes its source not ready, and the error names the reference, never the value.
 
 A non-optional secret that is unset, empty or unreadable makes its source **not ready**: the source answers `503` and forwards nothing, the error is logged, and `hookgate_source_ready{source=...}` is `0`. Other sources keep serving. A check whose secrets are all optional and all unset is also not ready, so a source can never run without a secret.
 

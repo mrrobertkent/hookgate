@@ -155,6 +155,26 @@ sources:
 	}
 }
 
+func TestShortStandardWebhooksSecretIsNotReady(t *testing.T) {
+	up := &captured{}
+	srv := httptest.NewServer(up.handler(200))
+	defer srv.Close()
+	t.Setenv("SW_SECRET", "whsec_"+base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("k"), 23)))
+	g := newGateway(t, `
+sources:
+  - name: sw
+    path: /sw
+    checks: [{standard_webhooks: {secrets: [{env: SW_SECRET}]}}]
+    forward: {urls: [`+srv.URL+`]}
+`)
+	if w := post(g, "/sw", "{}", nil); w.Code != 503 {
+		t.Errorf("got %d, want 503", w.Code)
+	}
+	if len(up.reqs) != 0 {
+		t.Errorf("upstream got %d requests", len(up.reqs))
+	}
+}
+
 func TestRetriesNextTargetOn5xxAndTransportError(t *testing.T) {
 	failing := &captured{}
 	f := httptest.NewServer(failing.handler(503))

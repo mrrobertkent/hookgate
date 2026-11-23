@@ -16,12 +16,14 @@ Requires Go (the version in `go.mod`).
 go test -race ./...
 go test -run='^$' -fuzz=FuzzHMAC -fuzztime=30s ./internal/verify
 go test -run='^$' -fuzz=FuzzHost -fuzztime=30s ./internal/gateway
+go test -run='^$' -fuzz='^FuzzStandardWebhooks$' -fuzztime=30s ./internal/verify
+go test -run='^$' -fuzz=FuzzStandardWebhooksSecret -fuzztime=30s ./internal/verify
 go vet ./...
 gofmt -l .
 golangci-lint run   # version pinned in .github/workflows/ci.yml
 ```
 
-Keep the dependency list short: hookgate depends only on the Go standard library and a YAML parser. Every verification change needs tests for the valid case, the forged case, the missing-header case and the missing-secret case.
+Keep the dependency list short: hookgate depends only on the Go standard library and a YAML parser; its tests also use the Standard Webhooks reference library as an oracle. Every verification change needs tests for the valid case, the forged case, the missing-header case and the missing-secret case.
 
 ## Pull requests
 

@@ -52,6 +52,49 @@ func TestValidationErrors(t *testing.T) {
 	}
 }
 
+const standardWebhooks = `
+sources:
+  - name: s
+    path: /s
+    checks: [{standard_webhooks: {secrets: [{env: K}]}}]
+    forward: {urls: [http://upstream:8080/in]}
+`
+
+func TestStandardWebhooks(t *testing.T) {
+	c, err := Parse([]byte(standardWebhooks))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sw := c.Sources[0].Checks[0].StandardWebhooks; sw.Headers != "standard" || *sw.Tolerance != 5*time.Minute {
+		t.Errorf("standard_webhooks defaults: %+v", sw)
+	}
+	c, err = Parse([]byte(strings.Replace(standardWebhooks, "{secrets:", "{headers: svix, tolerance: 30s, secrets:", 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sw := c.Sources[0].Checks[0].StandardWebhooks; sw.Headers != "svix" || *sw.Tolerance != 30*time.Second {
+		t.Errorf("standard_webhooks settings: %+v", sw)
+	}
+
+	cases := map[string]struct{ yaml, want string }{
+		"unknown headers":       {strings.Replace(standardWebhooks, "{secrets:", "{headers: custom, secrets:", 1), "standard_webhooks.headers must be standard or svix"},
+		"negative tolerance":    {strings.Replace(standardWebhooks, "{secrets:", "{tolerance: -1s, secrets:", 1), "standard_webhooks.tolerance must be > 0 and <= 1h"},
+		"zero tolerance":        {strings.Replace(standardWebhooks, "{secrets:", "{tolerance: 0s, secrets:", 1), "standard_webhooks.tolerance must be > 0 and <= 1h"},
+		"long tolerance":        {strings.Replace(standardWebhooks, "{secrets:", "{tolerance: 61m, secrets:", 1), "standard_webhooks.tolerance must be > 0 and <= 1h"},
+		"no secrets":            {strings.Replace(standardWebhooks, "secrets: [{env: K}]", "secrets: []", 1), "standard_webhooks: at least one secret is required"},
+		"with hmac":             {strings.Replace(standardWebhooks, "{standard_webhooks:", "{hmac: {header: X, algorithm: sha256, secrets: [{env: K}]}, standard_webhooks:", 1), "set exactly one of token, hmac, standard_webhooks"},
+		"empty check":           {strings.Replace(standardWebhooks, "checks: [{standard_webhooks: {secrets: [{env: K}]}}]", "checks: [{}]", 1), "set exactly one of token, hmac, standard_webhooks"},
+		"two standard_webhooks": {strings.Replace(standardWebhooks, "checks: [{standard_webhooks: {secrets: [{env: K}]}}]", "checks: [{standard_webhooks: {secrets: [{env: K}]}}, {standard_webhooks: {headers: svix, secrets: [{env: K}]}}]", 1), "at most one standard_webhooks check is allowed"},
+		"unknown key":           {strings.Replace(standardWebhooks, "{secrets:", "{header: X, secrets:", 1), "field header not found"},
+	}
+	for name, c := range cases {
+		_, err := Parse([]byte(c.yaml))
+		if err == nil || !strings.Contains(err.Error(), c.want) {
+			t.Errorf("%s: got %v, want an error containing %q", name, err, c.want)
+		}
+	}
+}
+
 func TestSecretRef(t *testing.T) {
 	dir := t.TempDir()
 	f := filepath.Join(dir, "s")

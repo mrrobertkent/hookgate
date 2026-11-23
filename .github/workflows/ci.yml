@@ -24,6 +24,10 @@ jobs:
         run: go test -run='^$' -fuzz=FuzzHMAC -fuzztime=60s ./internal/verify
       - name: Fuzz host normalisation
         run: go test -run='^$' -fuzz=FuzzHost -fuzztime=30s ./internal/gateway
+      - name: Fuzz the Standard Webhooks verifier
+        run: go test -run='^$' -fuzz='^FuzzStandardWebhooks$' -fuzztime=60s ./internal/verify
+      - name: Fuzz the Standard Webhooks secret decoder
+        run: go test -run='^$' -fuzz=FuzzStandardWebhooksSecret -fuzztime=30s ./internal/verify
       - name: Validate the example configuration
         env:
           E2_WEBHOOK_TOKEN: example-token-value
