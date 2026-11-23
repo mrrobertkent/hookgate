@@ -26,6 +26,9 @@ var (
 	ErrBucketNotFound = errors.New("claim check: bucket not found")
 	// ErrWrongBucket reports a reference to a bucket other than the store's.
 	ErrWrongBucket = errors.New("claim check: reference names another bucket")
+	// ErrBucketUnsuitable reports a bucket whose stream could drop or evict stored chunks, or that a reader
+	// limited to direct gets cannot read.
+	ErrBucketUnsuitable = errors.New("claim check: bucket unsuitable")
 )
 
 // Ref locates a stored body.
@@ -98,11 +101,32 @@ func (s *ObjectStore) Check(ctx context.Context) (Limits, error) {
 		}
 		return Limits{}, err
 	}
+	c := st.CachedInfo().Config
+	if err := suitable(c); err != nil {
+		return Limits{}, fmt.Errorf("%w: %s: %w", ErrBucketUnsuitable, s.bucket, err)
+	}
 	s.mu.Lock()
 	s.stream = st
 	s.mu.Unlock()
-	c := st.CachedInfo().Config
 	return Limits{MaxBytes: c.MaxBytes, TTL: c.MaxAge, MaxMsgSize: c.MaxMsgSize}, nil
+}
+
+// suitable rejects stream settings under which an acknowledged chunk can disappear before the bucket TTL, and
+// buckets without direct get, which the store's lookups use.
+func suitable(c jetstream.StreamConfig) error {
+	switch {
+	case c.NoAck:
+		return errors.New("no_ack must be false")
+	case c.Retention != jetstream.LimitsPolicy:
+		return errors.New("retention must be limits")
+	case c.Discard != jetstream.DiscardNew:
+		return errors.New("discard must be new")
+	case c.MaxMsgsPerSubject > 0:
+		return errors.New("max_msgs_per_subject must be unlimited")
+	case !c.AllowDirect:
+		return errors.New("allow_direct must be true")
+	}
+	return nil
 }
 
 func (s *ObjectStore) bound(ctx context.Context) (jetstream.Stream, error) {
@@ -134,8 +158,9 @@ type object struct {
 }
 
 // Put stores body under key. An existing object there is reused when it is complete, holds the same bytes and
-// its first chunk is no older than ReuseWithin; an existing object that is not reusable leaves key untouched and
-// the body goes to "<key>/<unix seconds>" instead.
+// its first chunk is no older than ReuseWithin. An existing object that is not reusable leaves key untouched and
+// the body goes to the generation key "<key>/<n>", where n numbers the ReuseWithin-long window of the current
+// time, so retries within one window find the same generation.
 func (s *ObjectStore) Put(ctx context.Context, key string, body []byte, sha256hex string) (Ref, error) {
 	if len(body) == 0 {
 		return Ref{}, errors.New("claim check: empty body")
@@ -149,7 +174,7 @@ func (s *ObjectStore) Put(ctx context.Context, key string, body []byte, sha256he
 		return Ref{}, err
 	}
 	o := object{body: body, digest: "SHA-256=" + base64.URLEncoding.EncodeToString(sum[:])}
-	for _, name := range []string{key, fmt.Sprintf("%s/%d", key, time.Now().Unix())} {
+	for _, name := range []string{key, s.generationKey(key)} {
 		done, err := s.reuseOrCreate(ctx, st, name, o)
 		if err != nil {
 			return Ref{}, err
@@ -159,6 +184,11 @@ func (s *ObjectStore) Put(ctx context.Context, key string, body []byte, sha256he
 		}
 	}
 	return Ref{}, fmt.Errorf("claim check: objects under %s exist and are not reusable", key)
+}
+
+func (s *ObjectStore) generationKey(key string) string {
+	window := max(int64(s.opts.ReuseWithin/time.Second), 1)
+	return fmt.Sprintf("%s/%d", key, time.Now().Unix()/window)
 }
 
 // reuseOrCreate reports done when name holds o afterwards, and false when name holds something else.
@@ -177,15 +207,26 @@ func (s *ObjectStore) reuseOrCreate(ctx context.Context, st jetstream.Stream, na
 	if !isConflict(err) {
 		return false, err
 	}
-	// Another writer created name first; its object is as good as ours if it holds the same bytes.
-	info, found, err = s.lookup(ctx, st, name)
+	// Another writer created name first; its object is as good as ours if it holds the same bytes. Direct gets
+	// may be served by a replica that has not applied the winner's metadata yet.
+	for wait := 25 * time.Millisecond; ; wait *= 2 {
+		info, found, err = s.lookup(ctx, st, name)
+		if err != nil || found || wait > 200*time.Millisecond {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-time.After(wait):
+		}
+	}
 	if err != nil {
 		return false, err
 	}
-	if ok, err := s.reusable(ctx, st, info, o); err != nil || ok || !found {
+	if ok, err := s.reusable(ctx, st, info, o); err != nil || ok {
 		return ok, err
 	}
-	return false, fmt.Errorf("claim check: object %s was created concurrently with other content", name)
+	return false, fmt.Errorf("claim check: object %s was created concurrently and is not reusable", name)
 }
 
 // lookup returns the current metadata of name. Metadata that does not parse is found with a nil info.
@@ -206,22 +247,31 @@ func (s *ObjectStore) lookup(ctx context.Context, st jetstream.Stream, name stri
 	return &info, true, nil
 }
 
-// reusable reports whether info describes a complete copy of o whose first chunk is recent enough.
+// reusable reports whether info describes a complete copy of o whose first chunk is recent enough: every chunk
+// the metadata counts is still stored, and size and digest match.
 func (s *ObjectStore) reusable(ctx context.Context, st jetstream.Stream, info *jetstream.ObjectInfo, o object) (bool, error) {
 	if info == nil || info.Deleted || info.NUID == "" || info.Chunks == 0 ||
 		info.Size != uint64(len(o.body)) || info.Digest != o.digest {
 		return false, nil
 	}
+	subj := s.chunkSubject(info.NUID)
 	rctx, cancel := s.request(ctx)
 	defer cancel()
-	first, err := st.GetMsg(rctx, 1, jetstream.WithGetMsgSubject(s.chunkSubject(info.NUID)))
+	first, err := st.GetMsg(rctx, 1, jetstream.WithGetMsgSubject(subj))
 	if errors.Is(err, jetstream.ErrMsgNotFound) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
 	}
-	return time.Since(first.Time) <= s.opts.ReuseWithin, nil
+	if time.Since(first.Time) > s.opts.ReuseWithin {
+		return false, nil
+	}
+	si, err := st.Info(rctx, jetstream.WithSubjectFilter(subj))
+	if err != nil {
+		return false, err
+	}
+	return si.State.Subjects[subj] == uint64(info.Chunks), nil
 }
 
 // write stores o as name: every chunk with its own acknowledged publish, then the metadata, created only if

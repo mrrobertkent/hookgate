@@ -45,11 +45,12 @@ type Output interface {
 }
 
 // Watcher is an Output that checks its destination in the background: on Run, on every Reconnected call, and
-// periodically while not ready.
+// periodically while not ready. Disconnected and Reconnected invalidate the last check.
 type Watcher interface {
 	Output
 	Run(ctx context.Context)
 	Reconnected()
+	Disconnected()
 }
 
 // ErrNotConnected reports that the output's broker connection is down.

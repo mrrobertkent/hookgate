@@ -77,7 +77,7 @@ The sender gets `200` only after the stream acknowledged the message, with the b
 | Stored by the stream (or already stored) | `200`, body above | `published`, `duplicate` |
 | Connection down, publish timed out or failed, stream full, wrong stream, claim-check store failed, output checks failing | `503`, body `unavailable` | `output_error`, `not_ready` |
 | Message over the server's `max_payload` (prevented by the output's checks; see below) | `413` | `too_large` |
-| Event ID empty, repeated or outside its character set; headers over `max_header_bytes` | `400` | `bad_request` |
+| Event ID empty, repeated or outside its character set (from a signature check or an unsigned header); headers over `max_header_bytes` | `400` | `bad_request` |
 | Body over `max_body_bytes` | `413` | `too_large` |
 | A check failed | `reject_status` (`401`) | `rejected` |
 
@@ -98,13 +98,21 @@ hookgate never creates or changes streams or buckets; the deployment does. A str
 | Setting | Value | Why |
 |---|---|---|
 | `subjects` | `webhooks.events.>` | One subject per source. |
-| `num_replicas` | `3` | A `200` then means a quorum of servers holds the event, so losing one server loses nothing. |
+| `retention` | `limits` (required) | With `interest` or `workqueue` retention the stream can acknowledge an event that no consumer was waiting for without storing it. The output's checks require `limits` and acknowledgements (`no_ack: false`). |
+| `storage` | `file` (required for durability) | A memory stream loses everything when its servers restart. hookgate logs a warning. |
+| `num_replicas` | `3` (recommended) | A `200` then means a quorum of servers holds the event, so losing one server loses nothing. With one replica hookgate logs a warning. |
 | `duplicate_window` | Longer than the slowest sender's retry schedule (48 h covers one that retries for 28 h) | Repeats within the window are dropped by the broker. Each tracked ID costs memory on every replica. |
 | `discard` | `new` | A full stream refuses new events, which the sender retries, instead of deleting older events no consumer has processed. |
 | `max_age` | As long as a consumer outage you want to survive (for example 14 days) | |
 | `max_msg_size` | At least `inline_max_bytes` + `max_header_bytes` | The output's checks fail otherwise. |
 
-The claim-check bucket needs a TTL of at least the stream's `max_age` plus the output's `reuse_within` (16 days for 14 days + 24 h, with a day's margin), the same replicas as the stream, and `max_bytes` of at least `max_body_bytes` + 1 MiB. The output's checks enforce the TTL and size rules.
+The claim-check bucket needs:
+
+- a TTL of at least the stream's `max_age` + the output's `reuse_within` + its `timeout` + 1 h (16 days covers 14 days + 24 h + 10 s + 1 h): an object is reused only while its first chunk is younger than `reuse_within`, and the publish that follows can take up to `timeout`;
+- `max_bytes` of at least `max_body_bytes` + 1 MiB, and the same replicas and storage as the stream;
+- `limits` retention, `discard: new`, no per-subject message limit and direct get, which every bucket created by a NATS client or the `nats` CLI has. Under other settings an acknowledged chunk can be evicted.
+
+The output's checks enforce all of these. Also turn off rollups on the bucket's stream (`allow_rollup_hdrs: false`; `nats stream edit OBJ_<bucket> --no-allow-rollup`): hookgate's writer never needs them, and with them on, any identity that may write the bucket's metadata can purge stored bodies with one publish. Without rollups a bucket writer can still publish a delete marker that hides an object from readers, so grant bucket write permissions only to hookgate. Stock clients (`nats object put`) cannot write to a bucket without rollups; readers are unaffected.
 
 **Durability on disk.** By default NATS fsyncs JetStream writes every two minutes, so an acknowledged message can sit in the page cache of every replica; a power loss that hits a quorum of servers at once can lose it. Set the server option `jetstream { sync_interval: always }` where an acknowledgement must mean the event is on disk: the server then syncs JetStream writes to disk as it stores them instead of on a timer, at a cost in throughput ([NATS: sync_interval](https://docs.nats.io/reference/config/jetstream/sync_interval)). The option needs a server restart.
 

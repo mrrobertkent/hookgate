@@ -77,6 +77,9 @@ func standardWebhooksKey(v string) ([]byte, error) {
 func (s *standardWebhooks) Verify(h http.Header, body []byte) (Result, error) {
 	id, err := single(h, s.id)
 	if err != nil {
+		if len(h.Values(s.id)) > 1 {
+			return Result{}, eventIDError{err.Error()}
+		}
 		return Result{}, err
 	}
 	ts, err := single(h, s.timestamp)
@@ -96,7 +99,7 @@ func (s *standardWebhooks) Verify(h http.Header, body []byte) (Result, error) {
 		return Result{}, fmt.Errorf("signature in %s does not match", s.signature)
 	}
 	if !contract.ValidEventID(m.id) {
-		return Result{}, fmt.Errorf("header %s must be 1-%d bytes of A-Z a-z 0-9 _ ~ = + -", s.id, contract.MaxEventIDBytes)
+		return Result{}, eventIDError{fmt.Sprintf("header %s must be 1-%d bytes of A-Z a-z 0-9 _ ~ = + -", s.id, contract.MaxEventIDBytes)}
 	}
 	return Result{EventID: m.id, SignedAt: signedAt}, nil
 }

@@ -218,6 +218,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	x.bytes = len(body)
 	verified, rej := s.verify(r, body)
+	if rej == nil {
+		// Readiness can change while a slow body is read.
+		rej = outputUnready(s)
+	}
 	if rej != nil {
 		x.reply(*rej)
 		return
@@ -299,15 +303,21 @@ func precheck(w http.ResponseWriter, r *http.Request, s *source) *rejection {
 	case s.notReady != nil:
 		return &rejection{status: http.StatusServiceUnavailable, outcome: "not_ready", reason: "source secrets not set"}
 	}
-	if err := s.out.Ready(); err != nil {
-		outcome := "not_ready"
-		if errors.Is(err, output.ErrNotConnected) {
-			outcome = "output_error"
-		}
-		return &rejection{status: http.StatusServiceUnavailable, outcome: outcome, reason: err.Error(),
-			header: http.Header{contentType: {"text/plain; charset=utf-8"}}, body: unavailableBody}
+	return outputUnready(s)
+}
+
+// outputUnready rejects a request while the source's output cannot deliver.
+func outputUnready(s *source) *rejection {
+	err := s.out.Ready()
+	if err == nil {
+		return nil
 	}
-	return nil
+	outcome := "not_ready"
+	if errors.Is(err, output.ErrNotConnected) {
+		outcome = "output_error"
+	}
+	return &rejection{status: http.StatusServiceUnavailable, outcome: outcome, reason: err.Error(),
+		header: http.Header{contentType: {"text/plain; charset=utf-8"}}, body: unavailableBody}
 }
 
 func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, *rejection) {
@@ -326,6 +336,9 @@ func (s *source) verify(r *http.Request, body []byte) (verify.Result, *rejection
 	var out verify.Result
 	for _, v := range s.verifiers {
 		res, err := v.Verify(r.Header, body)
+		if errors.Is(err, verify.ErrInvalidEventID) {
+			return verify.Result{}, &rejection{status: http.StatusBadRequest, outcome: "bad_request", reason: err.Error()}
+		}
 		if err != nil {
 			return verify.Result{}, &rejection{status: s.cfg.RejectStatus, outcome: "rejected", reason: err.Error()}
 		}
@@ -373,12 +386,12 @@ func (g *Gateway) Run(ctx context.Context) error {
 
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
-		return err
+		return errors.Join(err, g.closeWithin(ctx))
 	}
 	aln, err := net.Listen("tcp", admin.Addr)
 	if err != nil {
 		ln.Close()
-		return err
+		return errors.Join(err, g.closeWithin(ctx))
 	}
 	errc := make(chan error, 2)
 	go func() { errc <- srv.Serve(ln) }()
@@ -387,8 +400,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 
 	select {
 	case serveErr := <-errc:
-		_ = g.Close(context.WithoutCancel(ctx))
-		return serveErr
+		return errors.Join(serveErr, g.closeWithin(ctx))
 	case <-ctx.Done():
 	}
 	g.m.draining.Store(true)
@@ -403,4 +415,12 @@ func (g *Gateway) Run(ctx context.Context) error {
 	_ = admin.Shutdown(sctx)
 	g.log.Info("stopped")
 	return errors.Join(err, cerr)
+}
+
+// closeWithin releases the connections and watchers when Run ends without a shutdown, bounded by
+// shutdown_timeout.
+func (g *Gateway) closeWithin(ctx context.Context) error {
+	cctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), g.cfg.ShutdownTimeout)
+	defer cancel()
+	return g.Close(cctx)
 }

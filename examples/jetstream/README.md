@@ -7,7 +7,7 @@ A three-node NATS JetStream cluster and hookgate, built from this repository, pu
 | [`compose.yaml`](compose.yaml) | `keys` (generates NKeys), `nats-1`..`nats-3` (the cluster), `setup` (creates the stream and the bucket; also the NATS CLI), `hookgate`. |
 | [`nats.conf`](nats.conf) | Cluster member: JetStream with `sync_interval: always`, routes, and the accounts `keys` writes. |
 | [`keys.sh`](keys.sh) | Generates an admin and a gateway NKey and writes the accounts and permissions. |
-| [`setup.sh`](setup.sh) | Creates `WEBHOOK_EVENTS` (R3, `discard new`, 48 h duplicate window, 14 days) and `WEBHOOK_CLAIMS` (R3, 16-day TTL). |
+| [`setup.sh`](setup.sh) | Creates `WEBHOOK_EVENTS` (R3, file, `limits` retention, `discard new`, 48 h duplicate window, 14 days) and `WEBHOOK_CLAIMS` (R3, 16-day TTL, rollups off). |
 | [`hookgate.yaml`](hookgate.yaml) | One source, `demo`: a token check, event IDs from `X-Event-Id`, JetStream output with a claim check. |
 
 The NKeys are generated into a Docker volume on first start; nothing secret is in this directory.

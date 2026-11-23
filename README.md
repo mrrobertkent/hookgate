@@ -29,7 +29,7 @@ hookgate closes that path:
 - **Verifies per sender.** Static tokens, HMAC-SHA1/256/512 signatures in hex, base64 or base64url with prefixes and multi-signature headers, and Standard Webhooks (Svix) signatures with timestamp checks. Every check of a source must pass.
 - **Fails closed.** A missing or too-short secret takes its own source offline (`503`), never open. Unknown config keys stop startup.
 - **Delivers exactly what it verified.** The output receives the verified bytes and an allowlist of headers, nothing else, with retries across instances.
-- **Saves, then acknowledges.** With the JetStream output the sender gets `200` only once a replicated stream holds the event; large bodies go to an Object Store first (claim check).
+- **Saves, then acknowledges.** With the JetStream output the sender gets `200` only once the stream holds the event; large bodies go to an Object Store first (claim check).
 - **Costs almost nothing.** One ~16 MB distroless image, no database, no queue, Prometheus metrics built in.
 
 ## How it works
@@ -287,7 +287,7 @@ Configure the Vector `http_server` source with `auth` for the same token and `ac
 
 ## JetStream output
 
-A source with `output.jetstream` publishes each verified request to a NATS JetStream stream and answers the sender `200` only after the stream acknowledged it, so an event a sender saw accepted is already replicated. hookgate stays stateless: the deployment owns the stream and the bucket.
+A source with `output.jetstream` publishes each verified request to a NATS JetStream stream and answers the sender `200` only after the stream acknowledged it. With a file-backed stream of three replicas and `sync_interval: always` on the servers, an event a sender saw accepted is on disk on a quorum of servers ([pairing a stream](docs/contract.md#pairing-a-stream)). hookgate stays stateless: the deployment owns the stream and the bucket.
 
 ```yaml
 connections:

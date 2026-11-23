@@ -5,9 +5,11 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/mrrobertkent/hookgate/internal/config"
 	"github.com/mrrobertkent/hookgate/internal/contract"
+	"github.com/mrrobertkent/hookgate/internal/output"
 	"github.com/mrrobertkent/hookgate/internal/testutil"
 )
 
@@ -180,7 +183,8 @@ func TestShutdownDuringPendingPubAck(t *testing.T) {
 		return err == nil
 	}, "gateway did not start")
 
-	proxy.SetDelay(time.Second)
+	proxy.HoldNext([]byte(`"stream":"EVENTS"`), time.Second)
+	published := proxy.Seen([]byte("webhooks.events.src"))
 	status := make(chan int, 1)
 	go func() {
 		req, _ := http.NewRequest(http.MethodPost, "http://"+addr+"/e", strings.NewReader("{}"))
@@ -194,7 +198,11 @@ func TestShutdownDuringPendingPubAck(t *testing.T) {
 		resp.Body.Close()
 		status <- resp.StatusCode
 	}()
-	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-published:
+	case <-time.After(5 * time.Second):
+		t.Fatal("publish not seen")
+	}
 	cancel()
 	if code := <-status; code != 200 {
 		t.Fatalf("pending publish answered %d", code)
@@ -372,5 +380,81 @@ sources:
 	}
 	if _, ok := m.Header["svix-signature"]; ok {
 		t.Error("signature header published")
+	}
+}
+
+// A reconnect invalidates the previous check: after the server comes back without the stream, the source is not
+// ready until a check on the new connection passes, with no manual nudge.
+func TestReconnectRechecksDestination(t *testing.T) {
+	port := testutil.FreePort(t)
+	first := testutil.RunServer(t, func(o *server.Options) { o.Port = port })
+	_, js := testutil.Connect(t, first.ClientURL())
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}})
+	g := jetStreamGateway(t, []string{first.ClientURL()}, "", "")
+	closeGateway(t, g)
+	waitReady(t, g)
+	src := g.routes["/e"].any
+	gauge := func() string {
+		rec := httptest.NewRecorder()
+		g.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+		return rec.Body.String()
+	}
+
+	first.Shutdown()
+	first.WaitForShutdown()
+	testutil.Eventually(t, 5*time.Second, func() bool {
+		return errors.Is(src.out.Ready(), output.ErrNotConnected) && strings.Contains(gauge(), `hookgate_source_ready{source="src"} 0`)
+	}, "source still ready after the server stopped")
+
+	testutil.RunServer(t, func(o *server.Options) { o.Port = port }) // fresh store: no stream
+	testutil.Eventually(t, 15*time.Second, func() bool {
+		err := src.out.Ready()
+		return err != nil && strings.Contains(err.Error(), "stream EVENTS not found")
+	}, "reconnect did not re-run the checks")
+	if code := sendEvent(g, "after-restart"); code != 503 {
+		t.Errorf("request after reconnect: %d", code)
+	}
+}
+
+// A malformed event ID that a Standard Webhooks check rejects gets 400, not reject_status.
+func TestRepeatedSignedEventIDIs400(t *testing.T) {
+	t.Setenv("SW_SECRET", "whsec_"+base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
+	cfg, err := config.Parse([]byte(`
+sources:
+  - name: s
+    path: /e
+    checks: [{standard_webhooks: {secrets: [{env: SW_SECRET}]}}]
+    output: {http: {urls: ["http://127.0.0.1:1/"]}}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	closeGateway(t, g)
+	r := httptest.NewRequest(http.MethodPost, "/e", strings.NewReader("{}"))
+	r.Header["Webhook-Id"] = []string{"a", "b"}
+	r.Header.Set("Webhook-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+	r.Header.Set("Webhook-Signature", "v1,x")
+	w := httptest.NewRecorder()
+	g.ServeHTTP(w, r)
+	if w.Code != 400 {
+		t.Errorf("repeated webhook-id: %d", w.Code)
+	}
+}
+
+// Run that cannot bind its listener still releases the connections New opened.
+func TestRunBindFailureClosesConnections(t *testing.T) {
+	s := testutil.RunServer(t)
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	g := jetStreamGateway(t, []string{s.ClientURL()}, "listen: \""+busy.Addr().String()+"\"\nshutdown_timeout: 30s\n", "")
+	if err := g.Run(context.Background()); err == nil {
+		t.Fatal("Run bound a busy address")
+	}
+	if !g.conns["ev"].IsClosed() {
+		t.Error("connection left open")
 	}
 }

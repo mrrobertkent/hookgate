@@ -16,6 +16,8 @@ hookgate reads one YAML file: `-config FILE`, else `$HOOKGATE_CONFIG`, else `/et
 | `drain_delay` | `0s` | After SIGTERM, keep accepting requests this long (with `/readyz` answering `503`) so load balancers stop routing here first. |
 | `shutdown_timeout` | `30s` | Time in-flight requests get to finish after the drain; NATS connections are then drained within what is left of it. |
 
+Every timeout must be greater than zero; `drain_delay` may be `0s` but not negative.
+
 ## Sources
 
 Each entry of `sources` is one sender.
@@ -143,8 +145,8 @@ connections:
 |---|---|---|
 | name (map key) | required | Referenced by `output.jetstream.connection`. Same rule as source names. |
 | `nats.urls` | required | Server URLs: `nats://`, `tls://`, `ws://` or `wss://`, without credentials in the URL. |
-| `nats.nkey_seed` | — | Secret reference to a user NKey seed. A file is read again at every reconnect, so a rotated seed takes effect without a restart. |
-| `nats.creds` | — | Secret reference to a creds file (user JWT and seed), for servers in operator mode. A file is read again at every reconnect. |
+| `nats.nkey_seed` | — | Secret reference to a user NKey seed. The public key is fixed when hookgate starts, so switching to a new seed needs a restart. |
+| `nats.creds` | — | Secret reference to a creds file (user JWT and seed), for servers in operator mode. A file is read again at every reconnect, so a replaced file takes effect on the next reconnect. |
 | `nats.token` | — | Secret reference to a token. |
 | `nats.none` | `false` | `true` connects without credentials. Exactly one of `nkey_seed`, `creds`, `token` and `none: true` is required. |
 | `nats.tls.ca` | system roots | Secret reference to the PEM CA bundle that signs the servers' certificates. |
@@ -191,28 +193,34 @@ output:
 | `stream` | required | Stream the subject must be stored in. Every publish expects it, so a subject captured by another stream, or by none, fails instead of landing elsewhere. hookgate never creates or changes streams. |
 | `pass_headers` | none | Request headers published, under lowercase names (`webhook-id`, `content-type`). Same matching as `output.http.pass_headers`, credential headers excluded. Patterns that could match a reserved name (`Hookgate-*`, `Nats-*`, `Status`, `Description`) are configuration errors. |
 | `set_headers` | none | Headers added to every message, names exactly as written, each a non-optional secret reference. Reserved names are configuration errors. |
-| `message_id.header` | none | Request header that supplies the event ID when no check authenticates one. Requires `message_id.unauthenticated: true`. |
+| `message_id.header` | none | Request header that supplies the event ID when no check authenticates one. Requires `message_id.unauthenticated: true`. Must not be a header any check of the source reads (a token, a signature). |
 | `message_id.unauthenticated` | `false` | Acknowledges that the header is not covered by a signature, so anyone who replays a captured body chooses its ID. |
 | `claim_check.object_store.bucket` | — | Object Store bucket for bodies over `inline_max_bytes`. Required when `max_body_bytes` exceeds `inline_max_bytes`. |
 | `claim_check.reuse_within` | `24h` | A stored body for the same event and content is reused when its upload is younger than this; an older one stays untouched and the body is stored again under a new key. |
 | `inline_max_bytes` | `262144` | Largest body published inside the message. |
-| `max_header_bytes` | `16384` | Largest encoded size of the published headers; a request whose headers would exceed it gets `400`. At least `1024`. |
+| `max_header_bytes` | `16384` | Largest encoded size of all published headers, hookgate's own included; a request whose headers would exceed it gets `400`. Between `1024` and `65535`, the largest header block JetStream stores. |
 | `attempt_timeout` | `5s` | Limit for one publish attempt (or one claim-check request). |
 | `timeout` | `10s` | Limit for the whole output stage: storing the body and every publish attempt. `read_timeout` + `timeout` must not exceed `shutdown_timeout`, so every admitted request can finish its publish during a shutdown. |
 
-**Event ID.** A check that authenticates an event ID supplies it; otherwise `message_id.header`, when configured. An ID that is empty, repeated or not 1–200 bytes of `A-Z a-z 0-9 _ ~ = + -` gets `400`. With an ID, the message carries `Nats-Msg-Id: <source>:<event id>` and the stream drops repeats within its `duplicate_window`; without one, nothing is deduplicated.
+**Event ID.** A check that authenticates an event ID supplies it; otherwise `message_id.header`, when configured. An ID that is empty, repeated or not 1–200 bytes of `A-Z a-z 0-9 _ ~ = + -` gets `400`, whichever supplies it. With an ID, the message carries `Nats-Msg-Id: <source>:<event id>` and the stream drops repeats within its `duplicate_window`; without one, nothing is deduplicated.
 
 **Retries.** A publish attempt that times out, finds no stream responding, finds the connection down, or gets a server-side (`5xx`) JetStream error is retried until `timeout`. A timed-out attempt may still have been stored, so a retry without an event ID can store the event twice: delivery is at least once.
 
-**Inline or claim check.** A body is published inline when it is at most `inline_max_bytes` and, with its headers, fits the smaller of the server's `max_payload` and the stream's `max_msg_size`. Otherwise it is stored under `<source>/<event id>/<sha256>` (or `<source>/<sha256>` without an ID) in chunks of 128 KiB, each acknowledged, and only then is the object's metadata created, on condition that none exists. An existing complete object with the same content is reused; hookgate never overwrites, purges or deletes. A body stored for a publish that then fails stays until the bucket TTL removes it.
+**Inline or claim check.** A body is published inline when it is at most `inline_max_bytes` and, with its headers, fits the smaller of the server's `max_payload` and the stream's `max_msg_size`. Otherwise it is stored under `<source>/<event id>/<sha256>` (or `<source>/<sha256>` without an ID) in chunks of 128 KiB, each acknowledged, and only then is the object's metadata created, on condition that none exists. An existing object is reused when every chunk its metadata counts is still stored, its size and digest match, and its first chunk is no older than `reuse_within`. Otherwise the body goes to `<key>/<n>`, where `n` numbers the `reuse_within`-long time window, so retries in one window share it. hookgate never overwrites, purges or deletes. A body stored for a publish that then fails stays until the bucket TTL removes it.
 
 **Checks.** On every connect and reconnect, and every 5 s while one fails, the source checks its destination. While a check fails the source answers `503`, logs the reason and reports `hookgate_source_ready 0`:
 
-- the stream exists;
+- the stream exists, acknowledges publishes (`no_ack` false) and uses `limits` retention (with `interest` or `workqueue` retention a stream can acknowledge an event without storing it);
 - `inline_max_bytes` + `max_header_bytes` fits the smaller of the server's `max_payload` and the stream's `max_msg_size`;
-- with a claim check: the bucket exists; its `max_bytes`, when limited, is at least `max_body_bytes` + 1 MiB; its TTL, when set, is at least the stream's `max_age` + `reuse_within` (a stream without `max_age` needs a bucket without TTL); a 128 KiB chunk fits the server's `max_payload` and the bucket's `max_msg_size`.
+- with a claim check, the bucket's stream exists and:
+  - acknowledges publishes, uses `limits` retention, `discard: new`, no `max_msgs_per_subject` limit (every chunk of an object shares one subject) and direct get (`allow_direct`, the default for buckets);
+  - has a `max_bytes`, when limited, of at least `max_body_bytes` + 1 MiB;
+  - has a TTL, when set, of at least the stream's `max_age` + `reuse_within` + `timeout` + 1 h, so a body outlives every message that refers to it, a slow upload and a publish after reuse included (a stream without `max_age` needs a bucket without TTL);
+  - fits a 128 KiB chunk within the server's `max_payload` and the bucket's `max_msg_size`.
 
-While the connection is down the source answers `503` at once.
+A stream on memory storage or with one replica passes, with a warning in the log: an acknowledgement then does not survive the loss of a server. See [pairing a stream](contract.md#pairing-a-stream).
+
+A disconnect invalidates the last check: while the connection is down, and after a reconnect until the checks pass on the new connection, the source answers `503` and reports `hookgate_source_ready 0`. Readiness is checked again after the body is read, before delivery.
 
 **Shutdown.** On SIGTERM, requests already admitted finish their publish; the NATS connections are drained only after the HTTP server has shut down, within what is left of `shutdown_timeout`.
 

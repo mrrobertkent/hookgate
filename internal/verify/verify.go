@@ -31,6 +31,15 @@ type Result struct {
 	SignedAt time.Time
 }
 
+// ErrInvalidEventID matches a rejection caused by the request's event ID alone: repeated, or, once the
+// signature matched, empty or outside the event-ID character set. The request is malformed rather than forged.
+var ErrInvalidEventID = errors.New("invalid event id")
+
+type eventIDError struct{ msg string }
+
+func (e eventIDError) Error() string      { return e.msg }
+func (eventIDError) Is(target error) bool { return target == ErrInvalidEventID }
+
 // Verifier is one configured check with its secrets resolved.
 type Verifier interface {
 	// Verify returns a nil error when the request passes, or a short reason safe to log (never a secret, a

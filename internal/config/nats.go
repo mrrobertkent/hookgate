@@ -51,7 +51,7 @@ func (n *NATSConnection) Validate(where string) []error {
 	for _, u := range n.URLs {
 		pu, err := url.Parse(u)
 		if err != nil || !validNATSScheme(pu.Scheme) || pu.Host == "" || pu.User != nil {
-			errs = append(errs, fmt.Errorf("%s: nats url %q must be nats://, tls://, ws:// or wss:// host:port without credentials", where, u))
+			errs = append(errs, fmt.Errorf("%s: nats url %q must be nats://, tls://, ws:// or wss:// host:port without credentials", where, redactURL(u)))
 		}
 	}
 	errs = append(errs, n.validateAuth(where)...)
@@ -146,4 +146,16 @@ func (o ObjectStoreRef) Validate(where string) []error {
 		return []error{fmt.Errorf("%s: object_store.bucket must match %s", where, bucketRE)}
 	}
 	return nil
+}
+
+// redactURL hides any user information in a URL for errors and logs, and the whole value when it does not parse.
+func redactURL(u string) string {
+	pu, err := url.Parse(u)
+	if err != nil {
+		return "(unparseable URL)"
+	}
+	if pu.User != nil {
+		pu.User = url.User("redacted")
+	}
+	return pu.String()
 }

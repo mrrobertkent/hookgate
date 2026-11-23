@@ -92,9 +92,19 @@ func buildOn(t *testing.T, c *natsconn.Conn, src config.Source) *jetStreamOutput
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := c.WaitConnected(ctx); err == nil {
-		o.setCheck(o.check(ctx))
+		checkNow(o)
 	}
 	return o
+}
+
+// checkNow runs the destination checks once, as Run does.
+func checkNow(o *jetStreamOutput) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	o.mu.Lock()
+	gen := o.gen
+	o.mu.Unlock()
+	o.setCheck(o.check(ctx), gen)
 }
 
 func event(body string, h http.Header) Event {
@@ -299,8 +309,10 @@ func TestWrongStreamAnswers503(t *testing.T) {
 	}
 }
 
-// maxPayloadJS stands in for a client whose server lowered max_payload after the source's checks passed: the
-// inline decision and the startup checks make this unreachable otherwise.
+// maxPayloadJS stands in for a client whose server lowered max_payload after the source's checks passed. A real
+// broker cannot produce this: the checks keep inline_max_bytes + max_header_bytes within the client's known
+// max_payload, the inline decision uses that same value, and a server that lowers max_payload by reload does
+// not tell connected clients, so the client never rejects the publish itself.
 type maxPayloadJS struct{ jetstream.JetStream }
 
 func (maxPayloadJS) PublishMsg(context.Context, *nats.Msg, ...jetstream.PublishOpt) (*jetstream.PubAck, error) {
@@ -415,10 +427,9 @@ func TestOrphanExpiresByTTL(t *testing.T) {
 	testutil.CreateBucket(t, js, jetstream.ObjectStoreConfig{Bucket: "CLAIMS", TTL: 3 * time.Second})
 	src := sourceConfig(t, s.ClientURL(), "none: true", "1048576", strings.Replace(claimed, "{bucket: CLAIMS}}", "{bucket: CLAIMS}, reuse_within: 1s}", 1)+
 		"        attempt_timeout: 200ms\n        timeout: 1s\n")
+	// The bucket TTL is far below what the checks require, so the orphan's expiry is observable; Deliver
+	// itself does not consult readiness.
 	o := build(t, s.ClientURL(), src)
-	if err := o.Ready(); err != nil {
-		t.Fatal(err)
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := js.DeleteStream(ctx, "EVENTS"); err != nil {
@@ -441,19 +452,30 @@ func TestOrphanExpiresByTTL(t *testing.T) {
 type readinessCase struct {
 	name    string
 	payload int32
-	stream  bool
-	bucket  *jetstream.ObjectStoreConfig
+	stream  func(*jetstream.StreamConfig) // nil: no event stream
+	bucket  func(*jetstream.StreamConfig) // nil: no bucket
 	want    string
 }
 
+func noChange(*jetstream.StreamConfig) {}
+
 func TestNotReadyChecks(t *testing.T) {
 	for _, c := range []readinessCase{
-		{"stream missing", 0, false, &jetstream.ObjectStoreConfig{}, "stream EVENTS not found"},
-		{"size inequality", 16 << 10, true, &jetstream.ObjectStoreConfig{}, "exceed"},
-		{"bucket missing", 0, true, nil, "bucket not found"},
-		{"bucket too small", 0, true, &jetstream.ObjectStoreConfig{MaxBytes: 1 << 20}, "max_bytes"},
-		{"bucket TTL short", 0, true, &jetstream.ObjectStoreConfig{TTL: time.Hour}, "TTL"},
-		{"ready", 0, true, &jetstream.ObjectStoreConfig{TTL: 26 * time.Hour}, ""},
+		{"stream missing", 0, nil, noChange, "stream EVENTS not found"},
+		{"interest retention", 0, func(c *jetstream.StreamConfig) { c.Retention = jetstream.InterestPolicy }, noChange, "retention"},
+		{"stream without acks", 0, func(c *jetstream.StreamConfig) { c.NoAck = true }, noChange, "no_ack"},
+		{"bucket without acks", 0, noChange, func(c *jetstream.StreamConfig) { c.NoAck = true }, "no_ack"},
+		{"server max_payload", 16 << 10, noChange, noChange, "exceed"},
+		{"stream max_msg_size", 0, func(c *jetstream.StreamConfig) { c.MaxMsgSize = 20 << 10 }, noChange, "exceed"},
+		{"bucket missing", 0, noChange, nil, "bucket not found"},
+		{"bucket too small", 0, noChange, func(c *jetstream.StreamConfig) { c.MaxBytes = 1 << 20 }, "max_bytes"},
+		{"bucket TTL short", 0, noChange, func(c *jetstream.StreamConfig) { c.MaxAge = 25 * time.Hour }, "TTL"},
+		{"bucket chunk limit", 0, noChange, func(c *jetstream.StreamConfig) { c.MaxMsgSize = 64 << 10 }, "chunks"},
+		{"bucket discard old", 0, noChange, func(c *jetstream.StreamConfig) { c.Discard = jetstream.DiscardOld }, "discard"},
+		{"bucket per-subject limit", 0, noChange, func(c *jetstream.StreamConfig) { c.MaxMsgsPerSubject = 1 }, "max_msgs_per_subject"},
+		{"bucket without direct get", 0, noChange, func(c *jetstream.StreamConfig) { c.AllowDirect = false }, "allow_direct"},
+		{"bucket interest retention", 0, noChange, func(c *jetstream.StreamConfig) { c.Retention = jetstream.InterestPolicy }, "retention"},
+		{"ready", 0, noChange, func(c *jetstream.StreamConfig) { c.MaxAge = 27 * time.Hour }, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) { checkReadiness(t, c) })
 	}
@@ -466,12 +488,14 @@ func checkReadiness(t *testing.T, c readinessCase) {
 		}
 	})
 	_, js := testutil.Connect(t, s.ClientURL())
-	if c.stream {
-		eventsStream(t, js)
+	if c.stream != nil {
+		eventsStream(t, js, c.stream)
 	}
 	if c.bucket != nil {
-		c.bucket.Bucket = "CLAIMS"
-		testutil.CreateBucket(t, js, *c.bucket)
+		cfg := jetstream.StreamConfig{Name: "OBJ_CLAIMS", Subjects: []string{"$O.CLAIMS.C.>", "$O.CLAIMS.M.>"},
+			Discard: jetstream.DiscardNew, AllowRollup: true, AllowDirect: true}
+		c.bucket(&cfg)
+		testutil.CreateStream(t, js, cfg)
 	}
 	o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1048576",
 		"        inline_max_bytes: 10240\n        claim_check: {object_store: {bucket: CLAIMS}}\n"))
@@ -486,8 +510,6 @@ func TestChecksRerunOnReconnect(t *testing.T) {
 	s := testutil.RunServer(t)
 	_, js := testutil.Connect(t, s.ClientURL())
 	o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1024", ""))
-	var reported []error
-	o.report = func(err error) { reported = append(reported, err) }
 	if o.Ready() == nil {
 		t.Fatal("ready without a stream")
 	}
@@ -580,5 +602,38 @@ func assertCannotRemove(t *testing.T, nc *nats.Conn, admin jetstream.JetStream) 
 	}
 	if info, err := bucket.Info(ctx); err != nil || info.State.Msgs == 0 {
 		t.Errorf("bucket emptied: %v", err)
+	}
+}
+
+// A PubAck that arrives after its attempt timed out is lost to the client; the retry within the output's budget
+// is deduplicated with an event ID and stored twice without one (at least once).
+func TestLostPubAckIsRetried(t *testing.T) {
+	s := testutil.RunServer(t)
+	_, js := testutil.Connect(t, s.ClientURL())
+	eventsStream(t, js)
+	proxy := testutil.StartProxy(t, strings.TrimPrefix(s.ClientURL(), "nats://"))
+	url := "nats://" + proxy.Addr()
+	o := build(t, url, sourceConfig(t, url, "none: true", "1024",
+		"        message_id: {header: X-Event-Id, unauthenticated: true}\n        attempt_timeout: 300ms\n        timeout: 3s\n"))
+	if err := o.Ready(); err != nil {
+		t.Fatal(err)
+	}
+	ack := []byte(`"stream":"EVENTS"`)
+
+	proxy.HoldNext(ack, 700*time.Millisecond)
+	if res := deliver(o, event("{}", http.Header{"X-Event-Id": {"lost-1"}})); res.Status != 200 || res.Outcome != "duplicate" {
+		t.Fatalf("with an ID: %+v", res)
+	}
+	if n := len(streamMsgs(t, js, "EVENTS")); n != 1 {
+		t.Fatalf("with an ID: %d messages", n)
+	}
+
+	proxy.HoldNext(ack, 700*time.Millisecond)
+	if res := deliver(o, event("{}", nil)); res.Status != 200 || res.Outcome != "published" {
+		t.Fatalf("without an ID: %+v", res)
+	}
+	// One message from the first delivery, then the second event once per attempt the hold outlasted.
+	if n := len(streamMsgs(t, js, "EVENTS")); n < 3 {
+		t.Errorf("without an ID: %d messages, want the event stored again by the retry", n)
 	}
 }

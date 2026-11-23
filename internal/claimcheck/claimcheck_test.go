@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/mrrobertkent/hookgate/internal/testutil"
@@ -280,5 +281,93 @@ func TestFailedWriteLeavesNoMetadata(t *testing.T) {
 	}
 	if n := streamMsgs(t, js, s.metaSubject("k")); n != 0 {
 		t.Errorf("%d metadata messages after a failed write", n)
+	}
+}
+
+// bucketStream creates OBJ_CLAIMS directly, as a bucket with non-default settings.
+func bucketStream(t *testing.T, mutate func(*jetstream.StreamConfig)) jetstream.JetStream {
+	t.Helper()
+	s := testutil.RunServer(t)
+	_, js := testutil.Connect(t, s.ClientURL())
+	cfg := jetstream.StreamConfig{
+		Name: "OBJ_CLAIMS", Subjects: []string{"$O.CLAIMS.C.>", "$O.CLAIMS.M.>"},
+		Discard: jetstream.DiscardNew, AllowRollup: true, AllowDirect: true,
+	}
+	mutate(&cfg)
+	testutil.CreateStream(t, js, cfg)
+	return js
+}
+
+func TestCheckRejectsUnsuitableBuckets(t *testing.T) {
+	for name, mutate := range map[string]func(*jetstream.StreamConfig){
+		"interest retention":   func(c *jetstream.StreamConfig) { c.Retention = jetstream.InterestPolicy },
+		"discard old":          func(c *jetstream.StreamConfig) { c.Discard = jetstream.DiscardOld },
+		"one message per subj": func(c *jetstream.StreamConfig) { c.MaxMsgsPerSubject = 1 },
+		"no direct get":        func(c *jetstream.StreamConfig) { c.AllowDirect = false },
+		"no acks":              func(c *jetstream.StreamConfig) { c.NoAck = true },
+	} {
+		js := bucketStream(t, mutate)
+		if _, err := NewObjectStore(js, "CLAIMS", ObjectStoreOptions{}).Check(ctx(t)); !errors.Is(err, ErrBucketUnsuitable) {
+			t.Errorf("%s: Check = %v", name, err)
+		}
+	}
+	js := bucketStream(t, func(*jetstream.StreamConfig) {})
+	if _, err := NewObjectStore(js, "CLAIMS", ObjectStoreOptions{}).Check(ctx(t)); err != nil {
+		t.Errorf("suitable bucket: %v", err)
+	}
+}
+
+// Metadata that counts more chunks than are stored is not reused; the body goes to a generation key.
+func TestIncompleteObjectIsNotReused(t *testing.T) {
+	js, _ := setup(t, jetstream.ObjectStoreConfig{})
+	s := NewObjectStore(js, "CLAIMS", ObjectStoreOptions{ReuseWithin: time.Hour})
+	b, sum := body(2*ChunkSize, 10)
+	if _, err := s.Check(ctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	// One chunk stored, metadata claiming two.
+	id := "partialnuid"
+	if err := s.publish(ctx(t), &nats.Msg{Subject: s.chunkSubject(id), Data: b[:ChunkSize]}); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256(b)
+	meta, _ := json.Marshal(jetstream.ObjectInfo{ObjectMeta: jetstream.ObjectMeta{Name: "k"}, Bucket: "CLAIMS", NUID: id,
+		Size: uint64(len(b)), Chunks: 2, Digest: "SHA-256=" + base64.URLEncoding.EncodeToString(digest[:])})
+	if err := s.publish(ctx(t), &nats.Msg{Subject: s.metaSubject("k"), Data: meta}); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := s.Put(ctx(t), "k", b, sum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref.Key == "k" {
+		t.Fatal("reused an incomplete object")
+	}
+	if got, err := s.Get(ctx(t), ref); err != nil || !bytes.Equal(got, b) {
+		t.Errorf("Get generation: %v", err)
+	}
+}
+
+// Within one ReuseWithin window, retries after the base object went stale reuse one generation.
+func TestGenerationIsReusedWithinWindow(t *testing.T) {
+	js, _ := setup(t, jetstream.ObjectStoreConfig{})
+	s := NewObjectStore(js, "CLAIMS", ObjectStoreOptions{ReuseWithin: time.Hour})
+	b, sum := body(100, 11)
+	if _, err := s.Check(ctx(t)); err != nil {
+		t.Fatal(err)
+	}
+	// A base object that is not reusable: same name, different content.
+	other, _ := body(100, 12)
+	if err := s.write(ctx(t), "k", object{body: other, digest: "SHA-256=x"}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.Put(ctx(t), "k", b, sum)
+	if err != nil || first.Key != s.generationKey("k") {
+		t.Fatalf("first = %+v, %v", first, err)
+	}
+	msgs := streamMsgs(t, js, "$O.CLAIMS.>")
+	second, err := s.Put(ctx(t), "k", b, sum)
+	if err != nil || second != first || streamMsgs(t, js, "$O.CLAIMS.>") != msgs {
+		t.Errorf("retry = %+v, %v; wrote again: %v", second, err, streamMsgs(t, js, "$O.CLAIMS.>") != msgs)
 	}
 }

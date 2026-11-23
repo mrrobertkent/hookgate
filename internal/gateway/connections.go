@@ -24,11 +24,23 @@ func (w *watchers) add(conn string, o output.Watcher) {
 	w.mu.Unlock()
 }
 
-func (w *watchers) reconnected(conn string) {
+func (w *watchers) list(conn string) []output.Watcher {
 	w.mu.Lock()
-	list := append([]output.Watcher(nil), w.byConn[conn]...)
-	w.mu.Unlock()
-	for _, o := range list {
+	defer w.mu.Unlock()
+	return append([]output.Watcher(nil), w.byConn[conn]...)
+}
+
+func (w *watchers) state(conn string, up bool) {
+	if up {
+		return // Connected follows and starts a new check
+	}
+	for _, o := range w.list(conn) {
+		o.Disconnected()
+	}
+}
+
+func (w *watchers) reconnected(conn string) {
+	for _, o := range w.list(conn) {
 		o.Reconnected()
 	}
 }
@@ -51,7 +63,10 @@ func (g *Gateway) connect() (map[string]error, *watchers) {
 		g.m.connected.SetBool(false, name)
 		c, err := natsconn.Connect("hookgate-"+name, *g.cfg.Connections[name].NATS, g.log, natsconn.Callbacks{
 			Connected: func(*nats.Conn) { ws.reconnected(name) },
-			State:     func(up bool) { g.m.connected.SetBool(up, name) },
+			State: func(up bool) {
+				g.m.connected.SetBool(up, name)
+				ws.state(name, up)
+			},
 		})
 		if err != nil {
 			errs[name] = err

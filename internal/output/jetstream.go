@@ -25,11 +25,11 @@ import (
 // bucketHeadroom is the space a bucket must have beyond max_body_bytes, for metadata and orphaned chunks.
 const bucketHeadroom = 1 << 20
 
+// ttlMargin is added to the time a claimed body must outlive its upload.
+const ttlMargin = time.Hour
+
 // recheckEvery is how often a not-ready output checks its destination again between reconnects.
 const recheckEvery = 5 * time.Second
-
-// claimKeyReserve bounds the generation suffix ("/<unix seconds>") a claim key may gain.
-const claimKeyReserve = 21
 
 var (
 	errNotChecked     = errors.New("destination not checked yet")
@@ -60,6 +60,8 @@ type jetStreamOutput struct {
 	kick chan struct{}
 
 	mu       sync.Mutex
+	gen      uint64 // connection generation: advances on every disconnect and reconnect
+	checkGen uint64 // generation checkErr was obtained on
 	checkErr error
 	maxMsg   int64 // stream max_msg_size; <= 0 unlimited
 }
@@ -102,21 +104,38 @@ func newJetStream(src config.Source, d Deps) (*jetStreamOutput, error) {
 	return o, nil
 }
 
-// Ready reports ErrNotConnected while the connection is down, else the last check's result.
+// Ready reports ErrNotConnected while the connection is down, and otherwise the result of the last check, which
+// counts only when it ran on the current connection.
 func (o *jetStreamOutput) Ready() error {
 	if !o.nc.IsConnected() {
 		return ErrNotConnected
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if o.checkGen != o.gen {
+		return errNotChecked
+	}
 	return o.checkErr
 }
 
-// Reconnected asks Run to check the destination again.
+// Reconnected invalidates the last check and asks Run to check the destination again.
 func (o *jetStreamOutput) Reconnected() {
+	o.invalidate(errNotChecked)
 	select {
 	case o.kick <- struct{}{}:
 	default:
+	}
+}
+
+// Disconnected invalidates the last check.
+func (o *jetStreamOutput) Disconnected() { o.invalidate(ErrNotConnected) }
+
+func (o *jetStreamOutput) invalidate(reason error) {
+	o.mu.Lock()
+	o.gen++
+	o.mu.Unlock()
+	if o.report != nil {
+		o.report(reason)
 	}
 }
 
@@ -135,23 +154,33 @@ func (o *jetStreamOutput) Run(ctx context.Context) {
 		if !o.nc.IsConnected() {
 			continue // the reconnect callback kicks again
 		}
+		o.mu.Lock()
+		gen := o.gen
+		o.mu.Unlock()
 		err := o.check(ctx)
 		if ctx.Err() != nil {
 			return
 		}
-		o.setCheck(err)
-		if err != nil {
+		if !o.setCheck(err, gen) || err != nil {
 			t.Reset(recheckEvery)
 		}
 	}
 }
 
-func (o *jetStreamOutput) setCheck(err error) {
+// setCheck records a check's result unless the connection changed while it ran; it reports whether it did.
+func (o *jetStreamOutput) setCheck(err error, gen uint64) bool {
 	o.mu.Lock()
-	changed := (o.checkErr == nil) != (err == nil) || (err != nil && o.checkErr.Error() != err.Error())
-	o.checkErr = err
+	if gen != o.gen {
+		o.mu.Unlock()
+		return false
+	}
+	prev := o.checkErr
+	if o.checkGen != gen {
+		prev = errNotChecked
+	}
+	o.checkErr, o.checkGen = err, gen
 	o.mu.Unlock()
-	if changed {
+	if (prev == nil) != (err == nil) || (err != nil && prev.Error() != err.Error()) {
 		if err != nil {
 			o.log.Error("source not ready; it answers 503 until its output checks pass", "source", o.source, "error", err)
 		} else {
@@ -161,6 +190,7 @@ func (o *jetStreamOutput) setCheck(err error) {
 	if o.report != nil {
 		o.report(err)
 	}
+	return true
 }
 
 // check verifies the stream exists and every publish fits its limits, and that the claim-check bucket exists
@@ -176,6 +206,13 @@ func (o *jetStreamOutput) check(ctx context.Context) error {
 		return fmt.Errorf("stream %s: %w", o.cfg.Stream, err)
 	}
 	sc := st.CachedInfo().Config
+	if sc.NoAck {
+		return fmt.Errorf("stream %s has no_ack set; publishes would never be acknowledged", o.cfg.Stream)
+	}
+	if sc.Retention != jetstream.LimitsPolicy {
+		return fmt.Errorf("stream %s retention is %s; it must be limits, or the stream may acknowledge an event without storing it", o.cfg.Stream, sc.Retention)
+	}
+	o.warnDurability(sc)
 	o.mu.Lock()
 	o.maxMsg = int64(sc.MaxMsgSize)
 	o.mu.Unlock()
@@ -200,18 +237,27 @@ func (o *jetStreamOutput) checkStore(ctx context.Context, streamMaxAge time.Dura
 	if lim.MaxBytes > 0 && lim.MaxBytes < o.maxBody+bucketHeadroom {
 		return fmt.Errorf("bucket %s max_bytes %d is below max_body_bytes + 1 MiB (%d)", b, lim.MaxBytes, o.maxBody+bucketHeadroom)
 	}
-	if lim.TTL > 0 && (streamMaxAge <= 0 || lim.TTL < streamMaxAge+cc.ReuseWithin) {
-		return fmt.Errorf("bucket %s TTL %s is shorter than stream %s max_age (%s) + reuse_within (%s); a claimed body could expire before its message",
-			b, lim.TTL, o.cfg.Stream, streamMaxAge, cc.ReuseWithin)
+	if need := streamMaxAge + cc.ReuseWithin + o.cfg.Timeout + ttlMargin; lim.TTL > 0 && (streamMaxAge <= 0 || lim.TTL < need) {
+		return fmt.Errorf("bucket %s TTL %s is shorter than stream %s max_age (%s) + reuse_within (%s) + timeout (%s) + 1h (%s); a claimed body could expire before its message",
+			b, lim.TTL, o.cfg.Stream, streamMaxAge, cc.ReuseWithin, o.cfg.Timeout, need)
 	}
 	chunkLimit := o.nc.MaxPayload()
 	if lim.MaxMsgSize > 0 {
 		chunkLimit = min(chunkLimit, int64(lim.MaxMsgSize))
 	}
-	if claimcheck.ChunkSize+o.cfg.MaxHeaderBytes > chunkLimit {
+	chunkHeader := headerBytes(nil, "", "OBJ_"+b)
+	if claimcheck.ChunkSize+chunkHeader > chunkLimit {
 		return fmt.Errorf("bucket %s cannot store %d-byte chunks: the limit is %d", b, claimcheck.ChunkSize, chunkLimit)
 	}
 	return nil
+}
+
+// warnDurability logs when an acknowledgement from the stream does not mean the event survives a server loss.
+func (o *jetStreamOutput) warnDurability(sc jetstream.StreamConfig) {
+	if sc.Storage == jetstream.MemoryStorage || sc.Replicas < 2 {
+		o.log.Warn("stream is not replicated file storage; an acknowledged event can be lost with one server",
+			"source", o.source, "stream", o.cfg.Stream, "storage", sc.Storage.String(), "replicas", sc.Replicas)
+	}
 }
 
 // publishLimit is the largest message (headers and body) a publish may carry.
@@ -246,7 +292,7 @@ func (o *jetStreamOutput) Deliver(ctx context.Context, ev Event) Result {
 	if o.store != nil && !o.fitsInline(len(ev.Body), inlineHeader) {
 		key := contract.ClaimKey(o.source, id, sha)
 		h.Set(contract.HeaderClaimBucket, o.cfg.ClaimCheck.ObjectStore.Bucket)
-		h.Set(contract.HeaderClaimKey, key+strings.Repeat("x", claimKeyReserve))
+		h.Set(contract.HeaderClaimKey, key)
 		if n := headerBytes(h, msgID, o.cfg.Stream); n > o.cfg.MaxHeaderBytes {
 			return tooManyHeaderBytes(n)
 		}
@@ -257,6 +303,10 @@ func (o *jetStreamOutput) Deliver(ctx context.Context, ev Event) Result {
 		}
 		o.m.ClaimPuts.Inc(o.source, "ok")
 		h.Set(contract.HeaderClaimKey, ref.Key)
+		// A generation key is a few bytes longer than the key checked above.
+		if n := headerBytes(h, msgID, o.cfg.Stream); n > o.cfg.MaxHeaderBytes {
+			return tooManyHeaderBytes(n)
+		}
 		data = nil
 	} else if inlineHeader > o.cfg.MaxHeaderBytes {
 		return tooManyHeaderBytes(inlineHeader)

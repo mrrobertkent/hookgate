@@ -162,6 +162,7 @@ func (c *Config) validate() error {
 	if c.MaxConcurrent < 1 {
 		errs = append(errs, errors.New("max_concurrent must be >= 1"))
 	}
+	errs = append(errs, c.validateTimeouts()...)
 	if len(c.Sources) == 0 {
 		errs = append(errs, errors.New("at least one source is required"))
 	}
@@ -180,6 +181,25 @@ func (c *Config) validate() error {
 		errs = append(errs, s.Output.validate(where, s, c)...)
 	}
 	return errors.Join(errs...)
+}
+
+func (c *Config) validateTimeouts() []error {
+	var errs []error
+	for _, d := range []struct {
+		key string
+		v   time.Duration
+	}{
+		{"read_header_timeout", c.ReadHeaderTimeout}, {"read_timeout", c.ReadTimeout}, {"write_timeout", c.WriteTimeout},
+		{"idle_timeout", c.IdleTimeout}, {"shutdown_timeout", c.ShutdownTimeout},
+	} {
+		if d.v <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be > 0", d.key))
+		}
+	}
+	if c.DrainDelay < 0 {
+		errs = append(errs, errors.New("drain_delay must be >= 0"))
+	}
+	return errs
 }
 
 // route is one (host, path) pair a source answers; an empty host stands for the source without hosts.

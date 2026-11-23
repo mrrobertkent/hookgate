@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/mrrobertkent/hookgate/internal/contract"
@@ -58,6 +59,9 @@ type ClaimCheck struct {
 	ObjectStore ObjectStoreRef `yaml:"object_store"`
 	ReuseWithin time.Duration  `yaml:"reuse_within"`
 }
+
+// MaxJetStreamHeaderBytes is the largest encoded header block JetStream stores; its length is kept in 16 bits.
+const MaxJetStreamHeaderBytes = 65535
 
 // DefaultSubject is the JetStream output's subject template when none is set.
 const DefaultSubject = "webhooks.events.{source}"
@@ -121,7 +125,7 @@ func (h *HTTPOutput) validate(where string) []error {
 	for _, u := range h.URLs {
 		pu, err := url.Parse(u)
 		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
-			errs = append(errs, fmt.Errorf("%s: output.http url %q must be an absolute http(s) URL", where, u))
+			errs = append(errs, fmt.Errorf("%s: output.http url %q must be an absolute http(s) URL", where, redactURL(u)))
 		}
 	}
 	for name, ref := range h.SetHeaders {
@@ -151,13 +155,13 @@ func (j *JetStreamOutput) validate(where string, s *Source, c *Config) []error {
 	if !streamNameRE.MatchString(j.Stream) {
 		errs = append(errs, fmt.Errorf("%s.stream is required and must be a stream name (no '.', '*', '>', '/', '\\' or whitespace)", w))
 	}
-	errs = append(errs, j.validateHeaders(w)...)
+	errs = append(errs, j.validateHeaders(w, s)...)
 	errs = append(errs, j.validateSizes(w, s)...)
 	errs = append(errs, j.validateTimes(w, s, c)...)
 	return errs
 }
 
-func (j *JetStreamOutput) validateHeaders(w string) []error {
+func (j *JetStreamOutput) validateHeaders(w string, s *Source) []error {
 	var errs []error
 	for _, p := range j.PassHeaders {
 		if !headerPatternRE.MatchString(p) {
@@ -178,6 +182,11 @@ func (j *JetStreamOutput) validateHeaders(w string) []error {
 	if m.Header != "" && !headerNameRE.MatchString(m.Header) {
 		errs = append(errs, fmt.Errorf("%s.message_id.header %q is not a header name", w, m.Header))
 	}
+	for _, c := range s.CredentialHeaders() {
+		if m.Header != "" && strings.EqualFold(m.Header, c) {
+			errs = append(errs, fmt.Errorf("%s.message_id.header %q is read by a check; a credential must never become an event ID", w, m.Header))
+		}
+	}
 	if (m.Header != "") != m.Unauthenticated {
 		errs = append(errs, fmt.Errorf("%s.message_id: header and unauthenticated: true go together (an unsigned header is anyone's choice)", w))
 	}
@@ -189,8 +198,8 @@ func (j *JetStreamOutput) validateSizes(w string, s *Source) []error {
 	if j.InlineMaxBytes < 1 {
 		errs = append(errs, fmt.Errorf("%s.inline_max_bytes must be >= 1", w))
 	}
-	if j.MaxHeaderBytes < 1024 {
-		errs = append(errs, fmt.Errorf("%s.max_header_bytes must be >= 1024", w))
+	if j.MaxHeaderBytes < 1024 || j.MaxHeaderBytes > MaxJetStreamHeaderBytes {
+		errs = append(errs, fmt.Errorf("%s.max_header_bytes must be between 1024 and %d, the JetStream header limit", w, MaxJetStreamHeaderBytes))
 	}
 	if j.ClaimCheck == nil {
 		if s.MaxBodyBytes > j.InlineMaxBytes {

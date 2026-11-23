@@ -341,3 +341,28 @@ func TestCredentialHeaders(t *testing.T) {
 		t.Errorf("CredentialHeaders = %v", got)
 	}
 }
+
+func TestJetStreamRejectsCredentialAsEventID(t *testing.T) {
+	y := strings.Replace(jetStreamConfig, "        stream: WEBHOOK_EVENTS\n", "        stream: WEBHOOK_EVENTS\n        message_id: {header: x-t, unauthenticated: true}\n", 1)
+	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "read by a check") {
+		t.Errorf("credential header as event ID: %v", err)
+	}
+}
+
+func TestLimitsAndRedaction(t *testing.T) {
+	for name, y := range map[string]string{
+		"header budget over the JetStream limit": strings.Replace(jetStreamConfig, "        stream: WEBHOOK_EVENTS\n", "        stream: WEBHOOK_EVENTS\n        max_header_bytes: 65536\n", 1),
+		"negative read timeout":                  "read_timeout: -1s\n" + jetStreamConfig,
+		"negative drain delay":                   "drain_delay: -1s\n" + jetStreamConfig,
+	} {
+		if _, err := Parse([]byte(y)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+	y := strings.Replace(jetStreamConfig, `"nats://nats-a:4222"`, `"nats://user:s3cret-pass@nats-a:4222"`, 1)
+	y = strings.Replace(y, `"tls://nats-b:4222"`, `"nats://s3cret-token@nats-b:4222"`, 1)
+	_, err := Parse([]byte(y))
+	if err == nil || strings.Contains(err.Error(), "s3cret") {
+		t.Errorf("URL credentials: %v", err)
+	}
+}
