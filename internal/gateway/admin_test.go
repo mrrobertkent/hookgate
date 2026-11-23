@@ -24,11 +24,11 @@ sources:
   - name: s
     path: /s
     checks: [{token: {header: X-T, secrets: [{env: T}]}}]
-    forward: {urls: [`+srv.URL+`]}
+    output: {http: {urls: [`+srv.URL+`]}}
   - name: broken
     path: /b
     checks: [{token: {header: X-T, secrets: [{env: MISSING_FOR_TEST}]}}]
-    forward: {urls: [`+srv.URL+`]}
+    output: {http: {urls: [`+srv.URL+`]}}
 `)
 	post(g, "/s", "{}", map[string]string{"X-T": "token-value-0123"})
 	post(g, "/s", "{}", map[string]string{"X-T": "wrong"})
@@ -90,7 +90,7 @@ sources:
   - name: s
     path: /s
     checks: [{token: {header: X-T, secrets: [{env: T}]}}]
-    forward: {urls: [` + srv.URL + `]}
+    output: {http: {urls: [` + srv.URL + `]}}
 `))
 	if err != nil {
 		t.Fatal(err)

@@ -28,6 +28,10 @@ jobs:
         run: go test -run='^$' -fuzz='^FuzzStandardWebhooks$' -fuzztime=60s ./internal/verify
       - name: Fuzz the Standard Webhooks secret decoder
         run: go test -run='^$' -fuzz=FuzzStandardWebhooksSecret -fuzztime=30s ./internal/verify
+      - name: Fuzz subject templates and event IDs
+        run: |
+          go test -run='^$' -fuzz=FuzzSubjectTemplate -fuzztime=30s ./internal/contract
+          go test -run='^$' -fuzz=FuzzEventID -fuzztime=30s ./internal/contract
       - name: Validate the example configuration
         env:
           E2_WEBHOOK_TOKEN: example-token-value

@@ -8,13 +8,13 @@ hookgate reads one YAML file: `-config FILE`, else `$HOOKGATE_CONFIG`, else `/et
 |---|---|---|
 | `listen` | `:8080` | Webhook listener. |
 | `admin_listen` | `:9090` | `/healthz`, `/readyz`, `/metrics`. Keep it off the public network. |
-| `max_concurrent` | `64` | Requests verified or forwarded at once; extra requests get `503`. |
+| `max_concurrent` | `64` | Requests verified or delivered at once; extra requests get `503`. |
 | `read_header_timeout` | `5s` | Time allowed for request headers. |
 | `read_timeout` | `15s` | Time allowed for the whole request, body included. |
-| `write_timeout` | `60s` | Time allowed to write the response; must exceed the longest `forward.timeout`. |
+| `write_timeout` | `60s` | Time allowed to write the response; must exceed the longest output `timeout`. |
 | `idle_timeout` | `120s` | Keep-alive idle time. Keep it above your proxy's idle timeout so the proxy never reuses a closed connection. |
 | `drain_delay` | `0s` | After SIGTERM, keep accepting requests this long (with `/readyz` answering `503`) so load balancers stop routing here first. |
-| `shutdown_timeout` | `30s` | Time in-flight requests get to finish after the drain. |
+| `shutdown_timeout` | `30s` | Time in-flight requests get to finish after the drain; NATS connections are then drained within what is left of it. |
 
 ## Sources
 
@@ -25,11 +25,11 @@ Each entry of `sources` is one sender.
 | `name` | required | Label used in logs and metrics. Letters, digits, `-` and `_`, starting with a letter or digit, at most 63 characters (`[A-Za-z0-9][A-Za-z0-9_-]{0,62}`); unique. |
 | `hosts` | none | Exact host names or IP addresses this source answers, for example `[hooks.example.com]`. Omitted means any host; an empty or null list, or a null entry, is a configuration error. See [Routing](#routing). |
 | `path` | required | Exact request path, for example `/github`. |
-| `max_body_bytes` | `1048576` | Larger bodies get `413` and are never forwarded. |
+| `max_body_bytes` | `1048576` | Larger bodies get `413` and are never delivered. The whole body is held in memory while it is verified and delivered, so memory peaks at about `max_concurrent` × the largest `max_body_bytes`. |
 | `allow_query` | `false` | Requests with a query string get `400` unless set: query parameters are not covered by signatures. |
-| `reject_status` | `401` | Status returned when a check fails. |
+| `reject_status` | `401` | Status returned when a check fails. Must not be `2xx` for a JetStream output. |
 | `checks` | required | One or more checks; **all** must pass. A source with no checks is a configuration error. |
-| `forward` | required | Where verified requests go. |
+| `output` | required | Where verified requests go: exactly one of [`http`](#outputhttp) or [`jetstream`](#outputjetstream). |
 
 ### Routing
 
@@ -121,17 +121,46 @@ secrets:
 
 Token and HMAC secrets must be at least 16 bytes (`standard_webhooks` secrets: 24 decoded bytes); use a random value such as `openssl rand -hex 32`. A shorter secret, optional or not, makes its source not ready, and the error names the reference, never the value.
 
-A non-optional secret that is unset, empty or unreadable makes its source **not ready**: the source answers `503` and forwards nothing, the error is logged, and `hookgate_source_ready{source=...}` is `0`. Other sources keep serving. A check whose secrets are all optional and all unset is also not ready, so a source can never run without a secret.
+A non-optional secret that is unset, empty or unreadable makes its source **not ready**: the source answers `503` and delivers nothing, the error is logged, and `hookgate_source_ready{source=...}` is `0`. Other sources keep serving. A check whose secrets are all optional and all unset is also not ready, so a source can never run without a secret.
 
 **Rotation:** add the new secret as a second, optional reference, deploy, switch the sender to the new secret, then remove the old reference.
 
-## `forward`
+## Connections
+
+`connections` names the broker connections outputs use. Each is opened once, when a source uses it, and shared by every source that names it.
+
+```yaml
+connections:
+  events:
+    nats:
+      urls: ["nats://nats-a:4222", "nats://nats-b:4222", "nats://nats-c:4222"]
+      nkey_seed: {file: /run/secrets/hookgate_nkey}
+      tls:                                   # optional
+        ca: {file: /run/secrets/nats_ca}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| name (map key) | required | Referenced by `output.jetstream.connection`. Same rule as source names. |
+| `nats.urls` | required | Server URLs: `nats://`, `tls://`, `ws://` or `wss://`, without credentials in the URL. |
+| `nats.nkey_seed` | — | Secret reference to a user NKey seed. A file is read again at every reconnect, so a rotated seed takes effect without a restart. |
+| `nats.creds` | — | Secret reference to a creds file (user JWT and seed), for servers in operator mode. A file is read again at every reconnect. |
+| `nats.token` | — | Secret reference to a token. |
+| `nats.none` | `false` | `true` connects without credentials. Exactly one of `nkey_seed`, `creds`, `token` and `none: true` is required. |
+| `nats.tls.ca` | system roots | Secret reference to the PEM CA bundle that signs the servers' certificates. |
+| `nats.tls.cert`, `nats.tls.key` | — | Secret references to a PEM client certificate and key, set together. TLS 1.2 is the minimum. |
+| `nats.inbox_prefix` | `_INBOX.<name>` | Prefix of the reply subjects; the identity needs subscribe permission on `<prefix>.>` only. Dot-separated tokens without whitespace or wildcards. |
+| `nats.connect_timeout` | `5s` | Limit for one connection attempt. |
+
+Authentication secrets may not be `optional`. An unset or unusable one makes every source using the connection not ready, like a missing check secret. An unreachable server is not an error: the client retries forever (with jitter), and the sources answer `503` until it connects. Publishing never waits for a reconnect behind the scenes; it fails at once and the output retries within its `timeout`.
+
+## `output.http`
 
 | Key | Default | Meaning |
 |---|---|---|
 | `urls` | required | One or more upstream URLs, used exactly as written (path and query included). |
 | `resolve_all` | `false` | Resolve each URL's host name to all of its addresses and treat each address as a target, in random order. Use it for a service name that fronts several instances. |
-| `pass_headers` | none | Request headers copied upstream. Names are case-insensitive; a trailing `*` matches a prefix (`X-GitHub-*`). Everything else, including the verified secret headers, is dropped. |
+| `pass_headers` | none | Request headers copied upstream. Names are case-insensitive; a trailing `*` matches a prefix (`X-GitHub-*`). Everything else is dropped, and so are the headers a check reads its token or signature from, even when a pattern matches them. |
 | `set_headers` | none | Headers added upstream, each a secret reference (for example the upstream's own credentials). |
 | `attempt_timeout` | `5s` | Limit for one attempt, including connecting. |
 | `timeout` | `20s` | Limit for all attempts together. Keep it below the sender's own timeout. |
@@ -141,16 +170,68 @@ The upstream receives the verified body byte for byte, with `POST`. A transport 
 
 Retries mean an upstream can receive the same request more than once (for example when it stored the request but the response was lost). Make the upstream idempotent or deduplicate downstream.
 
+## `output.jetstream`
+
+Publishes each verified request to a NATS JetStream stream and answers `200` only once the stream has acknowledged it. Bodies larger than `inline_max_bytes` go to a JetStream Object Store bucket first and the message carries a reference (a claim check). What consumers receive, and the status the sender gets for each outcome, is the [contract](contract.md).
+
+```yaml
+output:
+  jetstream:
+    connection: events
+    stream: WEBHOOK_EVENTS
+    pass_headers: [Content-Type, Webhook-*, Svix-*]
+    claim_check:
+      object_store: {bucket: WEBHOOK_CLAIMS}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `connection` | required | Name of a `connections` entry with `nats`. |
+| `subject` | `webhooks.events.{source}` | Subject template; `{source}` is the only placeholder. Tokens may not be empty or contain whitespace, `*` or `>`. |
+| `stream` | required | Stream the subject must be stored in. Every publish expects it, so a subject captured by another stream, or by none, fails instead of landing elsewhere. hookgate never creates or changes streams. |
+| `pass_headers` | none | Request headers published, under lowercase names (`webhook-id`, `content-type`). Same matching as `output.http.pass_headers`, credential headers excluded. Patterns that could match a reserved name (`Hookgate-*`, `Nats-*`, `Status`, `Description`) are configuration errors. |
+| `set_headers` | none | Headers added to every message, names exactly as written, each a non-optional secret reference. Reserved names are configuration errors. |
+| `message_id.header` | none | Request header that supplies the event ID when no check authenticates one. Requires `message_id.unauthenticated: true`. |
+| `message_id.unauthenticated` | `false` | Acknowledges that the header is not covered by a signature, so anyone who replays a captured body chooses its ID. |
+| `claim_check.object_store.bucket` | — | Object Store bucket for bodies over `inline_max_bytes`. Required when `max_body_bytes` exceeds `inline_max_bytes`. |
+| `claim_check.reuse_within` | `24h` | A stored body for the same event and content is reused when its upload is younger than this; an older one stays untouched and the body is stored again under a new key. |
+| `inline_max_bytes` | `262144` | Largest body published inside the message. |
+| `max_header_bytes` | `16384` | Largest encoded size of the published headers; a request whose headers would exceed it gets `400`. At least `1024`. |
+| `attempt_timeout` | `5s` | Limit for one publish attempt (or one claim-check request). |
+| `timeout` | `10s` | Limit for the whole output stage: storing the body and every publish attempt. `read_timeout` + `timeout` must not exceed `shutdown_timeout`, so every admitted request can finish its publish during a shutdown. |
+
+**Event ID.** A check that authenticates an event ID supplies it; otherwise `message_id.header`, when configured. An ID that is empty, repeated or not 1–200 bytes of `A-Z a-z 0-9 _ ~ = + -` gets `400`. With an ID, the message carries `Nats-Msg-Id: <source>:<event id>` and the stream drops repeats within its `duplicate_window`; without one, nothing is deduplicated.
+
+**Retries.** A publish attempt that times out, finds no stream responding, finds the connection down, or gets a server-side (`5xx`) JetStream error is retried until `timeout`. A timed-out attempt may still have been stored, so a retry without an event ID can store the event twice: delivery is at least once.
+
+**Inline or claim check.** A body is published inline when it is at most `inline_max_bytes` and, with its headers, fits the smaller of the server's `max_payload` and the stream's `max_msg_size`. Otherwise it is stored under `<source>/<event id>/<sha256>` (or `<source>/<sha256>` without an ID) in chunks of 128 KiB, each acknowledged, and only then is the object's metadata created, on condition that none exists. An existing complete object with the same content is reused; hookgate never overwrites, purges or deletes. A body stored for a publish that then fails stays until the bucket TTL removes it.
+
+**Checks.** On every connect and reconnect, and every 5 s while one fails, the source checks its destination. While a check fails the source answers `503`, logs the reason and reports `hookgate_source_ready 0`:
+
+- the stream exists;
+- `inline_max_bytes` + `max_header_bytes` fits the smaller of the server's `max_payload` and the stream's `max_msg_size`;
+- with a claim check: the bucket exists; its `max_bytes`, when limited, is at least `max_body_bytes` + 1 MiB; its TTL, when set, is at least the stream's `max_age` + `reuse_within` (a stream without `max_age` needs a bucket without TTL); a 128 KiB chunk fits the server's `max_payload` and the bucket's `max_msg_size`.
+
+While the connection is down the source answers `503` at once.
+
+**Shutdown.** On SIGTERM, requests already admitted finish their publish; the NATS connections are drained only after the HTTP server has shut down, within what is left of `shutdown_timeout`.
+
+**Permissions.** The identity needs only the permissions in [contract.md](contract.md#gateway-permissions).
+
 ## Metrics
 
 | Metric | Type | Labels |
 |---|---|---|
-| `hookgate_requests_total` | counter | `source`, `outcome` = `forwarded`, `rejected`, `upstream_error`, `too_large`, `bad_request`, `not_ready`, `busy` |
+| `hookgate_requests_total` | counter | `source`, `outcome` = `forwarded`, `published`, `duplicate`, `rejected`, `upstream_error`, `output_error`, `too_large`, `bad_request`, `not_ready`, `busy` |
 | `hookgate_upstream_attempts_total` | counter | `source`, `result` = `2xx`, `3xx`, `4xx`, `5xx`, `error` |
+| `hookgate_publish_attempts_total` | counter | `source`, `result` = `ok`, `duplicate`, `timeout`, `unavailable`, `too_large`, `error` |
+| `hookgate_publish_duration_seconds` | histogram | `source`; one observation per publish attempt |
+| `hookgate_claim_check_puts_total` | counter | `source`, `result` = `ok`, `error` |
+| `hookgate_nats_connected` | gauge | `connection` |
 | `hookgate_source_ready` | gauge | `source` |
 | `hookgate_in_flight_requests` | gauge | — |
 | `hookgate_draining` | gauge | — |
 
 ## Logs
 
-One JSON line per request on stderr: `source`, `outcome`, `status`, `reason` (for rejections), `remote`, `forwarded_for`, `bytes`, `duration_ms`. Secrets, signatures and bodies are never logged.
+One JSON line per request on stderr: `source`, `outcome`, `status`, `reason` (for rejections and failed deliveries), `remote`, `forwarded_for`, `bytes`, `duration_ms`. Secrets, signatures and bodies are never logged.

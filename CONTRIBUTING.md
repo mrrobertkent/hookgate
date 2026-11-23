@@ -18,12 +18,14 @@ go test -run='^$' -fuzz=FuzzHMAC -fuzztime=30s ./internal/verify
 go test -run='^$' -fuzz=FuzzHost -fuzztime=30s ./internal/gateway
 go test -run='^$' -fuzz='^FuzzStandardWebhooks$' -fuzztime=30s ./internal/verify
 go test -run='^$' -fuzz=FuzzStandardWebhooksSecret -fuzztime=30s ./internal/verify
+go test -run='^$' -fuzz=FuzzSubjectTemplate -fuzztime=30s ./internal/contract
+go test -run='^$' -fuzz=FuzzEventID -fuzztime=30s ./internal/contract
 go vet ./...
 gofmt -l .
 golangci-lint run   # version pinned in .github/workflows/ci.yml
 ```
 
-Keep the dependency list short: hookgate depends only on the Go standard library and a YAML parser; its tests also use the Standard Webhooks reference library as an oracle. Every verification change needs tests for the valid case, the forged case, the missing-header case and the missing-secret case.
+Keep the dependency list short. hookgate depends on the Go standard library, a YAML parser and the official NATS client (`github.com/nats-io/nats.go`, with its `nkeys` and `nuid` packages). The NATS client is maintained by the NATS project and widely used; without it, publishing to JetStream would need a separate bridge service in every deployment. `github.com/nats-io/nats-server/v2` is used only by tests, to run embedded servers, and is never linked into a binary. Tests also use the Standard Webhooks reference library as an oracle. Any other dependency needs the same justification in its pull request. Every verification change needs tests for the valid case, the forged case, the missing-header case and the missing-secret case.
 
 ## Pull requests
 

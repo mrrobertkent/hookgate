@@ -1,5 +1,5 @@
 // Package gateway serves the webhook endpoints: it verifies each request against its source's checks and
-// forwards only verified requests upstream.
+// delivers only verified requests to the source's output.
 package gateway
 
 import (
@@ -15,14 +15,19 @@ import (
 	"time"
 
 	"github.com/mrrobertkent/hookgate/internal/config"
+	"github.com/mrrobertkent/hookgate/internal/metrics"
+	"github.com/mrrobertkent/hookgate/internal/natsconn"
+	"github.com/mrrobertkent/hookgate/internal/output"
 	"github.com/mrrobertkent/hookgate/internal/verify"
 )
+
+const contentType = "Content-Type"
 
 type source struct {
 	cfg       config.Source
 	verifiers []verify.Verifier
-	forwarder *forwarder
-	notReady  error // set when a secret is missing; the source then answers 503 and forwards nothing
+	out       output.Output
+	notReady  error // set when a secret is missing; the source then answers 503 and delivers nothing
 }
 
 // route holds the sources that share one path: those that list hosts, by host, and the one without hosts.
@@ -37,11 +42,14 @@ type Gateway struct {
 	log    *slog.Logger
 	routes map[string]*route // by exact path
 	sem    chan struct{}
-	m      *metrics
+	m      *gatewayMetrics
+	conns  map[string]*natsconn.Conn
+	stop   context.CancelFunc // ends the output watchers
 }
 
-// New builds the gateway. A source whose secrets cannot be resolved stays configured but not ready: it answers
-// 503 and never forwards, while every other source keeps serving.
+// New builds the gateway and opens the connections its outputs use. A source whose secrets cannot be resolved
+// stays configured but not ready: it answers 503 and never delivers, while every other source keeps serving.
+// Close releases the connections when Run is not used.
 func New(cfg *config.Config, log *slog.Logger) *Gateway {
 	g := &Gateway{
 		cfg:    cfg,
@@ -50,30 +58,49 @@ func New(cfg *config.Config, log *slog.Logger) *Gateway {
 		sem:    make(chan struct{}, cfg.MaxConcurrent),
 		m:      newMetrics(),
 	}
+	ctx, stop := context.WithCancel(context.Background())
+	g.stop = stop
+	connErrs, watchers := g.connect()
 	for _, sc := range cfg.Sources {
-		s := &source{cfg: sc}
-		for _, c := range sc.Checks {
-			v, err := verify.Build(c)
-			if err != nil {
-				s.notReady = err
-				break
-			}
-			s.verifiers = append(s.verifiers, v)
+		s := g.build(sc, connErrs)
+		if w, ok := s.out.(output.Watcher); ok {
+			conn := sc.Output.JetStream.Connection
+			watchers.add(conn, w)
+			go w.Run(ctx)
 		}
-		if s.notReady == nil {
-			f, err := newForwarder(sc.Forward)
-			if err != nil {
-				s.notReady = err
-			}
-			s.forwarder = f
-		}
-		if s.notReady != nil {
-			log.Error("source not ready; it answers 503 until its secrets are set", "source", sc.Name, "error", s.notReady)
-		}
-		g.m.setReady(sc.Name, s.notReady == nil)
 		g.add(s)
 	}
 	return g
+}
+
+// build resolves a source's checks and output.
+func (g *Gateway) build(sc config.Source, connErrs map[string]error) *source {
+	s := &source{cfg: sc}
+	for _, c := range sc.Checks {
+		v, err := verify.Build(c)
+		if err != nil {
+			s.notReady = err
+			break
+		}
+		s.verifiers = append(s.verifiers, v)
+	}
+	if s.notReady == nil && sc.Output.JetStream != nil {
+		s.notReady = connErrs[sc.Output.JetStream.Connection]
+	}
+	if s.notReady == nil {
+		s.out, s.notReady = output.Build(sc, output.Deps{
+			Conns:       g.conns,
+			Metrics:     g.m.outputs,
+			Log:         g.log,
+			ReportReady: func(err error) { g.m.setReady(sc.Name, err == nil) },
+		})
+	}
+	if s.notReady != nil {
+		g.log.Error("source not ready; it answers 503 until its secrets are set", "source", sc.Name, "error", s.notReady)
+	}
+	_, watched := s.out.(output.Watcher)
+	g.m.setReady(sc.Name, s.notReady == nil && !watched)
+	return s
 }
 
 // add registers s under its path and hosts; config validation guarantees every (host, path) pair is unique.
@@ -163,13 +190,13 @@ func splitAuthority(a string) (string, bool) {
 
 // ServeHTTP handles webhook requests.
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
+	received := time.Now()
 	s := g.match(r)
 	if s == nil {
 		http.NotFound(w, r)
 		return
 	}
-	x := &exchange{g: g, w: w, r: r, name: s.cfg.Name, start: start}
+	x := &exchange{g: g, w: w, r: r, name: s.cfg.Name, start: received}
 	if rej := precheck(w, r, s); rej != nil {
 		x.reply(*rej)
 		return
@@ -178,7 +205,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case g.sem <- struct{}{}:
 		defer func() { <-g.sem }()
 	default:
-		x.reply(rejection{http.StatusServiceUnavailable, "busy", "max_concurrent reached", nil})
+		x.reply(rejection{status: http.StatusServiceUnavailable, outcome: "busy", reason: "max_concurrent reached"})
 		return
 	}
 	g.m.inFlight.Add(1)
@@ -189,16 +216,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		x.reply(*rej)
 		return
 	}
-	if rej := s.verify(r, body); rej != nil {
+	x.bytes = len(body)
+	verified, rej := s.verify(r, body)
+	if rej != nil {
 		x.reply(*rej)
 		return
 	}
-	res, err := s.forwarder.deliver(r.Context(), r, body, func(result string) { g.m.attempt(s.cfg.Name, result) })
-	if err != nil {
-		x.reply(rejection{http.StatusBadGateway, "upstream_error", err.Error(), []any{"bytes", len(body)}})
-		return
-	}
-	x.relay(res, len(body))
+	x.finish(s.out.Deliver(r.Context(), output.Event{
+		Source:     s.cfg.Name,
+		Header:     r.Header,
+		Body:       body,
+		EventID:    verified.EventID,
+		SignedAt:   verified.SignedAt,
+		ReceivedAt: received,
+	}))
 }
 
 // exchange is one request to a matched source, for writing its response, log line and metrics.
@@ -208,60 +239,73 @@ type exchange struct {
 	r     *http.Request
 	name  string
 	start time.Time
+	bytes int // body size; 0 until the body is read
 }
 
-// rejection is a response hookgate answers itself, without the upstream's.
+// rejection is a response hookgate answers before delivering anything.
 type rejection struct {
 	status          int
 	outcome, reason string
-	attrs           []any
+	header          http.Header
+	body            []byte
 }
 
 func (x *exchange) reply(rej rejection) {
-	x.g.m.request(x.name, rej.outcome)
-	x.w.WriteHeader(rej.status)
-	args := append([]any{"source", x.name, "outcome", rej.outcome, "status", rej.status,
-		"remote", x.r.RemoteAddr, "forwarded_for", x.r.Header.Get("X-Forwarded-For"),
-		"duration_ms", time.Since(x.start).Milliseconds()}, rej.attrs...)
-	if rej.reason != "" {
-		args = append(args, "reason", rej.reason)
-	}
-	level := slog.LevelWarn
-	if rej.status >= 500 {
-		level = slog.LevelError
-	}
-	x.g.log.Log(x.r.Context(), level, "webhook", args...)
+	x.finish(output.Result{Status: rej.status, Outcome: rej.outcome, Reason: rej.reason, Header: rej.header, Body: rej.body})
 }
 
-// relay returns the upstream's final response to the sender.
-func (x *exchange) relay(res *upstreamResult, n int) {
-	if ct := res.header.Get("Content-Type"); ct != "" {
-		x.w.Header().Set("Content-Type", ct)
+// finish writes the response, counts it and logs one line.
+func (x *exchange) finish(res output.Result) {
+	for k, v := range res.Header {
+		x.w.Header()[k] = v
 	}
-	outcome, level := "forwarded", slog.LevelInfo
-	if res.status >= 400 {
-		outcome, level = "upstream_error", slog.LevelError
-	}
-	x.g.m.request(x.name, outcome)
-	x.w.WriteHeader(res.status)
-	_, _ = x.w.Write(res.body)
-	x.g.log.Log(x.r.Context(), level, "webhook", "source", x.name, "outcome", outcome, "status", res.status,
+	x.g.m.request(x.name, res.Outcome)
+	x.w.WriteHeader(res.Status)
+	_, _ = x.w.Write(res.Body)
+	args := []any{"source", x.name, "outcome", res.Outcome, "status", res.Status,
 		"remote", x.r.RemoteAddr, "forwarded_for", x.r.Header.Get("X-Forwarded-For"),
-		"bytes", n, "duration_ms", time.Since(x.start).Milliseconds())
+		"duration_ms", time.Since(x.start).Milliseconds()}
+	if x.bytes > 0 {
+		args = append(args, "bytes", x.bytes)
+	}
+	if res.Reason != "" {
+		args = append(args, "reason", res.Reason)
+	}
+	x.g.log.Log(x.r.Context(), logLevel(res), "webhook", args...)
 }
 
-// precheck rejects a request that no check could accept, before its body is read.
+func logLevel(res output.Result) slog.Level {
+	switch {
+	case res.Status >= 500, res.Outcome == "upstream_error":
+		return slog.LevelError
+	case res.Status >= 400:
+		return slog.LevelWarn
+	}
+	return slog.LevelInfo
+}
+
+var unavailableBody = []byte("unavailable\n")
+
+// precheck rejects a request that no check could accept or no output could take, before its body is read.
 func precheck(w http.ResponseWriter, r *http.Request, s *source) *rejection {
 	switch ce := r.Header.Get("Content-Encoding"); {
 	case r.Method != http.MethodPost:
 		w.Header().Set("Allow", http.MethodPost)
-		return &rejection{http.StatusMethodNotAllowed, "bad_request", "method " + r.Method, nil}
+		return &rejection{status: http.StatusMethodNotAllowed, outcome: "bad_request", reason: "method " + r.Method}
 	case r.URL.RawQuery != "" && !s.cfg.AllowQuery:
-		return &rejection{http.StatusBadRequest, "bad_request", "query string not allowed", nil}
+		return &rejection{status: http.StatusBadRequest, outcome: "bad_request", reason: "query string not allowed"}
 	case ce != "" && ce != "identity":
-		return &rejection{http.StatusUnsupportedMediaType, "bad_request", "content-encoding " + ce, nil}
+		return &rejection{status: http.StatusUnsupportedMediaType, outcome: "bad_request", reason: "content-encoding " + ce}
 	case s.notReady != nil:
-		return &rejection{http.StatusServiceUnavailable, "not_ready", "source secrets not set", nil}
+		return &rejection{status: http.StatusServiceUnavailable, outcome: "not_ready", reason: "source secrets not set"}
+	}
+	if err := s.out.Ready(); err != nil {
+		outcome := "not_ready"
+		if errors.Is(err, output.ErrNotConnected) {
+			outcome = "output_error"
+		}
+		return &rejection{status: http.StatusServiceUnavailable, outcome: outcome, reason: err.Error(),
+			header: http.Header{contentType: {"text/plain; charset=utf-8"}}, body: unavailableBody}
 	}
 	return nil
 }
@@ -272,18 +316,27 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, *rej
 		return body, nil
 	}
 	if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-		return nil, &rejection{http.StatusRequestEntityTooLarge, "too_large", "body over max_body_bytes", nil}
+		return nil, &rejection{status: http.StatusRequestEntityTooLarge, outcome: "too_large", reason: "body over max_body_bytes"}
 	}
-	return nil, &rejection{http.StatusBadRequest, "bad_request", "reading body: " + err.Error(), nil}
+	return nil, &rejection{status: http.StatusBadRequest, outcome: "bad_request", reason: "reading body: " + err.Error()}
 }
 
-func (s *source) verify(r *http.Request, body []byte) *rejection {
+// verify runs every check and returns what they authenticated about the request.
+func (s *source) verify(r *http.Request, body []byte) (verify.Result, *rejection) {
+	var out verify.Result
 	for _, v := range s.verifiers {
-		if _, err := v.Verify(r.Header, body); err != nil {
-			return &rejection{s.cfg.RejectStatus, "rejected", err.Error(), []any{"bytes", len(body)}}
+		res, err := v.Verify(r.Header, body)
+		if err != nil {
+			return verify.Result{}, &rejection{status: s.cfg.RejectStatus, outcome: "rejected", reason: err.Error()}
+		}
+		if res.EventID != "" {
+			out.EventID = res.EventID
+		}
+		if !res.SignedAt.IsZero() {
+			out.SignedAt = res.SignedAt
 		}
 	}
-	return nil
+	return out, nil
 }
 
 // Admin serves /healthz (process alive), /readyz (503 while draining) and /metrics.
@@ -298,8 +351,8 @@ func (g *Gateway) Admin() http.Handler {
 		_, _ = io.WriteString(w, "ready\n")
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-		g.m.write(w)
+		w.Header().Set(contentType, metrics.ContentType)
+		g.m.reg.Write(w)
 	})
 	return mux
 }
@@ -334,6 +387,7 @@ func (g *Gateway) Run(ctx context.Context) error {
 
 	select {
 	case serveErr := <-errc:
+		_ = g.Close(context.WithoutCancel(ctx))
 		return serveErr
 	case <-ctx.Done():
 	}
@@ -343,7 +397,10 @@ func (g *Gateway) Run(ctx context.Context) error {
 	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), g.cfg.ShutdownTimeout)
 	defer cancel()
 	err = srv.Shutdown(sctx)
+	// Every admitted request has finished its publish (or the budget is spent); only now may the
+	// connections go.
+	cerr := g.Close(sctx)
 	_ = admin.Shutdown(sctx)
 	g.log.Info("stopped")
-	return err
+	return errors.Join(err, cerr)
 }
