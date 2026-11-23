@@ -150,7 +150,7 @@ func (f *httpOutput) deliver(ctx context.Context, ev Event) (*upstreamResult, er
 		return last, nil
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no attempt made before the forward timeout")
+		lastErr = errors.New("no attempt made before the output timeout")
 	}
 	return nil, lastErr
 }

@@ -60,6 +60,15 @@ jobs:
               --tmpfs /var/lib/otelcol/queue -v "$PWD/$config:/etc/otelcol-contrib/config.yaml:ro" \
               "$collector" validate --config=/etc/otelcol-contrib/config.yaml
           done
+      - name: Validate the JetStream example
+        working-directory: examples/jetstream
+        env:
+          DEMO_WEBHOOK_TOKEN: example-token-value
+        run: |
+          mkdir -p keys
+          go run github.com/nats-io/nkeys/nk -gen user > keys/hookgate.nk
+          go run ../../cmd/hookgate validate -config hookgate.yaml
+          docker compose config --quiet
       - name: Validate the Docker Compose example
         working-directory: examples/compose
         env:

@@ -31,7 +31,7 @@ Header names are case-sensitive on NATS and are published exactly as listed:
 | Passed request headers | The request headers the source's `pass_headers` selects, under lowercase names (`content-type`, `webhook-id`, `svix-timestamp`), every value kept. |
 | `set_headers` | The source's static headers, names exactly as configured. |
 
-Every message carries `Hookgate-Contract`, `Hookgate-Source`, `Hookgate-Body-Sha256` and `Hookgate-Body-Size`; a message without one of them is invalid.
+Every message carries `Hookgate-Contract`, `Hookgate-Source`, `Hookgate-Body-Sha256` and `Hookgate-Body-Size`; a message without one of them is invalid. The stored message also carries `Nats-Expected-Stream`, which the publish sets; consumers ignore every `Nats-*` header except `Nats-Msg-Id`, and never copy them into a new publish.
 
 No sender header and no configured header can carry a name starting with `Hookgate-` or `Nats-`, or the names `Status` and `Description`: configuration that could produce one is rejected, and request headers with such names are never published. The headers a check reads its token or signature from are never published either.
 

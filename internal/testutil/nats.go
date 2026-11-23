@@ -116,17 +116,24 @@ func (c *Cluster) URLs() []string {
 	return out
 }
 
-// WaitForMetaLeader waits until a running server is the JetStream meta leader.
+// WaitForMetaLeader waits until a running server is the JetStream meta leader and knows every running server
+// as a peer, so replicated assets can be placed.
 func (c *Cluster) WaitForMetaLeader(t testing.TB) {
 	t.Helper()
 	Eventually(t, 20*time.Second, func() bool {
+		running := 0
 		for _, s := range c.Servers {
-			if s.Running() && s.JetStreamIsLeader() {
+			if s.Running() {
+				running++
+			}
+		}
+		for _, s := range c.Servers {
+			if s.Running() && s.JetStreamIsLeader() && len(s.JetStreamClusterPeers()) >= running {
 				return true
 			}
 		}
 		return false
-	}, "no JetStream meta leader")
+	}, "no JetStream meta leader with every peer")
 }
 
 // StreamLeader returns the server leading stream in account $G.
