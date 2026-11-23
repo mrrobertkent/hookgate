@@ -303,9 +303,9 @@ func (o *jetStreamOutput) Deliver(ctx context.Context, ev Event) Result {
 	defer cancel()
 
 	data := ev.Body
-	var prepare func(nats.Header) error
+	var prepare func(context.Context, nats.Header) error
 	if o.store != nil && !o.fitsInline(len(ev.Body), inlineHeader) {
-		c := &claim{ctx: ctx, o: o, key: contract.ClaimKey(o.source, id, sha), body: ev.Body, sha: sha, msgID: msgID}
+		c := &claim{o: o, key: contract.ClaimKey(o.source, id, sha), body: ev.Body, sha: sha, msgID: msgID}
 		h.Set(contract.HeaderClaimBucket, o.cfg.ClaimCheck.ObjectStore.Bucket)
 		h.Set(contract.HeaderClaimKey, c.key)
 		if n := headerBytes(h, msgID, o.cfg.Stream); n > o.cfg.MaxHeaderBytes {
@@ -343,7 +343,6 @@ func (e headerSizeError) Error() string { return fmt.Sprintf("headers of %d byte
 // claim stores a body before its reference is published. The store is (re)done before the first publish attempt
 // and before any attempt that follows a reconnect, since the new server may not hold what the old one stored.
 type claim struct {
-	ctx         context.Context // the delivery's
 	o           *jetStreamOutput
 	key, sha    string
 	msgID       string
@@ -352,13 +351,13 @@ type claim struct {
 	storedOnRev uint64 // the client's reconnect count before the store
 }
 
-func (c *claim) prepare(h nats.Header) error {
+func (c *claim) prepare(ctx context.Context, h nats.Header) error {
 	o := c.o
 	reconnects := o.nc.Stats().Reconnects
 	if c.stored && c.storedOnRev == reconnects {
 		return nil
 	}
-	ref, err := o.store.Put(c.ctx, c.key, c.body, c.sha)
+	ref, err := o.store.Put(ctx, c.key, c.body, c.sha)
 	if err != nil {
 		o.m.ClaimPuts.Inc(o.source, "error")
 		return fmt.Errorf("%w: %w", errClaim, err)
@@ -456,7 +455,7 @@ func headerBytes(h nats.Header, msgID, stream string) int64 {
 // publish retries transient failures within ctx, each attempt bounded by attempt_timeout and preceded by prepare
 // when set; an error from prepare ends it. Every attempt is a fresh message, since a publish adds its option
 // headers to the message it sends.
-func (o *jetStreamOutput) publish(ctx context.Context, h nats.Header, data []byte, msgID string, prepare func(nats.Header) error) (*jetstream.PubAck, error) {
+func (o *jetStreamOutput) publish(ctx context.Context, h nats.Header, data []byte, msgID string, prepare func(context.Context, nats.Header) error) (*jetstream.PubAck, error) {
 	opts := []jetstream.PublishOpt{jetstream.WithExpectStream(o.cfg.Stream)}
 	if msgID != "" {
 		opts = append(opts, jetstream.WithMsgID(msgID))
@@ -464,7 +463,7 @@ func (o *jetStreamOutput) publish(ctx context.Context, h nats.Header, data []byt
 	wait := 50 * time.Millisecond
 	for {
 		if prepare != nil {
-			if err := prepare(h); err != nil {
+			if err := prepare(ctx, h); err != nil {
 				return nil, err
 			}
 		}

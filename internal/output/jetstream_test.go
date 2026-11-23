@@ -654,12 +654,12 @@ func TestClaimStoredAgainAfterReconnect(t *testing.T) {
 	sha := hex.EncodeToString(sum[:])
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	c := &claim{ctx: ctx, o: o, key: "src/" + sha, body: []byte(body), sha: sha}
+	c := &claim{o: o, key: "src/" + sha, body: []byte(body), sha: sha}
 	h := nats.Header{}
-	if err := c.prepare(h); err != nil {
+	if err := c.prepare(ctx, h); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.prepare(h); err != nil {
+	if err := c.prepare(ctx, h); err != nil {
 		t.Fatal(err)
 	}
 	// The object vanishes, as on a replacement server, and the client reconnects.
@@ -669,7 +669,7 @@ func TestClaimStoredAgainAfterReconnect(t *testing.T) {
 	before := o.nc.Stats().Reconnects
 	proxy.DropConnections()
 	testutil.Eventually(t, 10*time.Second, func() bool { return o.nc.Stats().Reconnects > before && o.nc.IsConnected() }, "no reconnect")
-	if err := c.prepare(h); err != nil {
+	if err := c.prepare(ctx, h); err != nil {
 		t.Fatal(err)
 	}
 	if got, err := obs.GetBytes(ctx, h.Get(contract.HeaderClaimKey)); err != nil || string(got) != body {
