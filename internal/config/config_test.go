@@ -366,3 +366,30 @@ func TestLimitsAndRedaction(t *testing.T) {
 		t.Errorf("URL credentials: %v", err)
 	}
 }
+
+func TestCheckMustNotReadEventIDHeader(t *testing.T) {
+	y := `
+sources:
+  - name: s
+    path: /s
+    checks:
+      - standard_webhooks: {headers: svix, secrets: [{env: K}]}
+      - token: {header: SVIX-ID, secrets: [{env: K}]}
+    output: {http: {urls: [http://u]}}
+`
+	if _, err := Parse([]byte(y)); err == nil || !strings.Contains(err.Error(), "carries the event ID") {
+		t.Errorf("token on the event-ID header: %v", err)
+	}
+}
+
+func TestRedactURL(t *testing.T) {
+	for in, want := range map[string]string{
+		"wss://user:pass@nats:443/ws?access_token=s3cret#frag": "wss://redacted@nats:443/ws?redacted",
+		"nats://nats:4222": "nats://nats:4222",
+		"://bad":           "(unparseable URL)",
+	} {
+		if got := RedactURL(in); got != want {
+			t.Errorf("RedactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

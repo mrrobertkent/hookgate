@@ -202,25 +202,28 @@ output:
 | `attempt_timeout` | `5s` | Limit for one publish attempt (or one claim-check request). |
 | `timeout` | `10s` | Limit for the whole output stage: storing the body and every publish attempt. `read_timeout` + `timeout` must not exceed `shutdown_timeout`, so every admitted request can finish its publish during a shutdown. |
 
-**Event ID.** A check that authenticates an event ID supplies it; otherwise `message_id.header`, when configured. An ID that is empty, repeated or not 1–200 bytes of `A-Z a-z 0-9 _ ~ = + -` gets `400`, whichever supplies it. With an ID, the message carries `Nats-Msg-Id: <source>:<event id>` and the stream drops repeats within its `duplicate_window`; without one, nothing is deduplicated.
+**Event ID.** A check that authenticates an event ID supplies it; otherwise `message_id.header`, when configured. An ID that is empty, repeated or not 1–200 bytes of `A-Z a-z 0-9 _ ~ = + -` gets `400`, whichever supplies it. A token or HMAC check may not read the header a check authenticates the ID from (`webhook-id`, `svix-id`), so a secret never becomes an event ID. With an ID, the message carries `Nats-Msg-Id: <source>:<event id>` and the stream drops repeats within its `duplicate_window`; without one, nothing is deduplicated.
+
+**Claim after a reconnect.** When the client reconnects during a claim-checked delivery, the body is stored again (or the stored copy found again) before the next publish attempt, since the new server may not hold it.
 
 **Retries.** A publish attempt that times out, finds no stream responding, finds the connection down, or gets a server-side (`5xx`) JetStream error is retried until `timeout`. A timed-out attempt may still have been stored, so a retry without an event ID can store the event twice: delivery is at least once.
 
 **Inline or claim check.** A body is published inline when it is at most `inline_max_bytes` and, with its headers, fits the smaller of the server's `max_payload` and the stream's `max_msg_size`. Otherwise it is stored under `<source>/<event id>/<sha256>` (or `<source>/<sha256>` without an ID) in chunks of 128 KiB, each acknowledged, and only then is the object's metadata created, on condition that none exists. An existing object is reused when every chunk its metadata counts is still stored, its size and digest match, and its first chunk is no older than `reuse_within`. Otherwise the body goes to `<key>/<n>`, where `n` numbers the `reuse_within`-long time window, so retries in one window share it. hookgate never overwrites, purges or deletes. A body stored for a publish that then fails stays until the bucket TTL removes it.
 
-**Checks.** On every connect and reconnect, and every 5 s while one fails, the source checks its destination. While a check fails the source answers `503`, logs the reason and reports `hookgate_source_ready 0`:
+**Checks.** On every connect and reconnect, every 5 s while one fails and every 30 s while all pass, the source checks its destination. While a check fails the source answers `503`, logs the reason and reports `hookgate_source_ready 0`:
 
-- the stream exists, acknowledges publishes (`no_ack` false) and uses `limits` retention (with `interest` or `workqueue` retention a stream can acknowledge an event without storing it);
+- the stream exists, acknowledges publishes (`no_ack` false), uses `limits` retention (with `interest` or `workqueue` retention a stream can acknowledge an event without storing it) and `discard: new` (with `discard: old` a full stream evicts acknowledged events);
 - `inline_max_bytes` + `max_header_bytes` fits the smaller of the server's `max_payload` and the stream's `max_msg_size`;
 - with a claim check, the bucket's stream exists and:
   - acknowledges publishes, uses `limits` retention, `discard: new`, no `max_msgs_per_subject` limit (every chunk of an object shares one subject) and direct get (`allow_direct`, the default for buckets);
+  - keeps bodies at least as durably as the stream keeps events: as many replicas or more, and file storage when the stream uses file storage;
   - has a `max_bytes`, when limited, of at least `max_body_bytes` + 1 MiB;
   - has a TTL, when set, of at least the stream's `max_age` + `reuse_within` + `timeout` + 1 h, so a body outlives every message that refers to it, a slow upload and a publish after reuse included (a stream without `max_age` needs a bucket without TTL);
   - fits a 128 KiB chunk within the server's `max_payload` and the bucket's `max_msg_size`.
 
 A stream on memory storage or with one replica passes, with a warning in the log: an acknowledgement then does not survive the loss of a server. See [pairing a stream](contract.md#pairing-a-stream).
 
-A disconnect invalidates the last check: while the connection is down, and after a reconnect until the checks pass on the new connection, the source answers `503` and reports `hookgate_source_ready 0`. Readiness is checked again after the body is read, before delivery.
+A disconnect invalidates the last check, and so does any reconnect, counted by the client: while the connection is down, and after a reconnect until the checks pass on the new connection, the source answers `503` and reports `hookgate_source_ready 0`. Readiness is checked again after the body is read, before delivery.
 
 **Shutdown.** On SIGTERM, requests already admitted finish their publish; the NATS connections are drained only after the HTTP server has shut down, within what is left of `shutdown_timeout`.
 

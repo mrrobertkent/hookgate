@@ -336,7 +336,9 @@ func (s *source) verify(r *http.Request, body []byte) (verify.Result, *rejection
 	var out verify.Result
 	for _, v := range s.verifiers {
 		res, err := v.Verify(r.Header, body)
-		if errors.Is(err, verify.ErrInvalidEventID) {
+		// A JetStream output publishes the ID, so a malformed one is a bad request; other outputs keep the
+		// configured rejection.
+		if errors.Is(err, verify.ErrInvalidEventID) && s.cfg.Output.JetStream != nil {
 			return verify.Result{}, &rejection{status: http.StatusBadRequest, outcome: "bad_request", reason: err.Error()}
 		}
 		if err != nil {

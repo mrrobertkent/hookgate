@@ -56,6 +56,16 @@ func (p *Proxy) Addr() string { return p.ln.Addr().String() }
 // SetDelay holds back each read from the target by d before passing it on; 0 passes it at once.
 func (p *Proxy) SetDelay(d time.Duration) { p.delay.Store(int64(d)) }
 
+// DropConnections closes every connection made so far, as a server restart would.
+func (p *Proxy) DropConnections() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.conns {
+		c.Close()
+	}
+	p.conns = nil
+}
+
 // HoldNext holds back the next read from the target that contains match by d, once.
 func (p *Proxy) HoldNext(match []byte, d time.Duration) {
 	p.mu.Lock()

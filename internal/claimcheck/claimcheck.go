@@ -39,9 +39,11 @@ type Ref struct {
 
 // Limits are the store's limits that callers check their own settings against.
 type Limits struct {
-	MaxBytes   int64         // total bytes the store holds; <= 0 is unlimited
-	TTL        time.Duration // age at which objects expire; 0 is never
-	MaxMsgSize int32         // largest single stored message; <= 0 is unlimited
+	MaxBytes    int64         // total bytes the store holds; <= 0 is unlimited
+	TTL         time.Duration // age at which objects expire; 0 is never
+	MaxMsgSize  int32         // largest single stored message; <= 0 is unlimited
+	Replicas    int           // copies kept
+	FileStorage bool          // stored on disk rather than in memory
 }
 
 // Store keeps bodies for claim-checked events.
@@ -108,7 +110,8 @@ func (s *ObjectStore) Check(ctx context.Context) (Limits, error) {
 	s.mu.Lock()
 	s.stream = st
 	s.mu.Unlock()
-	return Limits{MaxBytes: c.MaxBytes, TTL: c.MaxAge, MaxMsgSize: c.MaxMsgSize}, nil
+	return Limits{MaxBytes: c.MaxBytes, TTL: c.MaxAge, MaxMsgSize: c.MaxMsgSize,
+		Replicas: max(c.Replicas, 1), FileStorage: c.Storage == jetstream.FileStorage}, nil
 }
 
 // suitable rejects stream settings under which an acknowledged chunk can disappear before the bucket TTL, and

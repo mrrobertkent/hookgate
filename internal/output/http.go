@@ -173,6 +173,10 @@ func (f *httpOutput) attempt(ctx context.Context, target *url.URL, ev Event) (*u
 	}
 	resp, err := f.client.Do(req)
 	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = config.RedactURL(ue.URL) // the reason is logged; a URL can carry credentials
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()

@@ -125,7 +125,7 @@ func (h *HTTPOutput) validate(where string) []error {
 	for _, u := range h.URLs {
 		pu, err := url.Parse(u)
 		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
-			errs = append(errs, fmt.Errorf("%s: output.http url %q must be an absolute http(s) URL", where, redactURL(u)))
+			errs = append(errs, fmt.Errorf("%s: output.http url %q must be an absolute http(s) URL", where, RedactURL(u)))
 		}
 	}
 	for name, ref := range h.SetHeaders {

@@ -83,7 +83,7 @@ The sender gets `200` only after the stream acknowledged the message, with the b
 
 Broker errors are logged, never returned. The checks and the inline-or-claim-check decision keep every message within the server's `max_payload`, so `413` from the broker stage means the server's limit changed under a running gateway. Many senders retry every status other than `2xx`, `413` included.
 
-An HTTP output answers differently: the upstream's own final status and body, or `502` when no upstream answered. See [configuration](configuration.md#outputhttp).
+An HTTP output answers differently: the upstream's own final status and body, or `502` when no upstream answered; a malformed signed event ID gets `reject_status` there, since the HTTP output does not publish the ID. See [configuration](configuration.md#outputhttp).
 
 ## Delivery
 
@@ -102,14 +102,14 @@ hookgate never creates or changes streams or buckets; the deployment does. A str
 | `storage` | `file` (required for durability) | A memory stream loses everything when its servers restart. hookgate logs a warning. |
 | `num_replicas` | `3` (recommended) | A `200` then means a quorum of servers holds the event, so losing one server loses nothing. With one replica hookgate logs a warning. |
 | `duplicate_window` | Longer than the slowest sender's retry schedule (48 h covers one that retries for 28 h) | Repeats within the window are dropped by the broker. Each tracked ID costs memory on every replica. |
-| `discard` | `new` | A full stream refuses new events, which the sender retries, instead of deleting older events no consumer has processed. |
+| `discard` | `new` (required) | A full stream refuses new events, which the sender retries, instead of deleting acknowledged events; with `discard: old` a retry of an evicted event would even be acknowledged as a duplicate. |
 | `max_age` | As long as a consumer outage you want to survive (for example 14 days) | |
 | `max_msg_size` | At least `inline_max_bytes` + `max_header_bytes` | The output's checks fail otherwise. |
 
 The claim-check bucket needs:
 
 - a TTL of at least the stream's `max_age` + the output's `reuse_within` + its `timeout` + 1 h (16 days covers 14 days + 24 h + 10 s + 1 h): an object is reused only while its first chunk is younger than `reuse_within`, and the publish that follows can take up to `timeout`;
-- `max_bytes` of at least `max_body_bytes` + 1 MiB, and the same replicas and storage as the stream;
+- `max_bytes` of at least `max_body_bytes` + 1 MiB, and at least the stream's replicas and, for a file stream, file storage;
 - `limits` retention, `discard: new`, no per-subject message limit and direct get, which every bucket created by a NATS client or the `nats` CLI has. Under other settings an acknowledged chunk can be evicted.
 
 The output's checks enforce all of these. Also turn off rollups on the bucket's stream (`allow_rollup_hdrs: false`; `nats stream edit OBJ_<bucket> --no-allow-rollup`): hookgate's writer never needs them, and with them on, any identity that may write the bucket's metadata can purge stored bodies with one publish. Without rollups a bucket writer can still publish a delete marker that hides an object from readers, so grant bucket write permissions only to hookgate. Stock clients (`nats object put`) cannot write to a bucket without rollups; readers are unaffected.

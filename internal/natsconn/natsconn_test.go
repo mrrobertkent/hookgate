@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -128,5 +129,39 @@ func TestRetriesFailedConnectAndDrains(t *testing.T) {
 	}
 	if err := c.Drain(ctx); err != nil {
 		t.Errorf("second Drain: %v", err)
+	}
+}
+
+// Drain returns within its context even while the client is stuck in a handshake with a server that never
+// answers.
+func TestDrainBoundedDuringStalledHandshake(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, aerr := ln.Accept()
+			if aerr != nil {
+				return
+			}
+			defer c.Close() // accepted and never answered
+		}
+	}()
+	cfg := conn([]string{"nats://" + ln.Addr().String()}, func(c *config.NATSConnection) {
+		c.None = true
+		c.ConnectTimeout = 3 * time.Second
+	})
+	c, err := Connect("test", cfg, discard, Callbacks{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_ = c.Drain(ctx)
+	if d := time.Since(start); d > time.Second {
+		t.Errorf("Drain took %s with a 200ms budget", d)
 	}
 }

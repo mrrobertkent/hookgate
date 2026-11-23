@@ -97,7 +97,7 @@ func storedIDs(t *testing.T, js jetstream.JetStream) map[string]int {
 func TestJetStreamSourceAndMetrics(t *testing.T) {
 	s := testutil.RunServer(t)
 	_, js := testutil.Connect(t, s.ClientURL())
-	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}})
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	g := jetStreamGateway(t, []string{s.ClientURL()}, "", "")
 	closeGateway(t, g)
 	waitReady(t, g)
@@ -165,7 +165,7 @@ func TestJetStreamSourceUnavailable(t *testing.T) {
 func TestShutdownDuringPendingPubAck(t *testing.T) {
 	s := testutil.RunServer(t)
 	_, js := testutil.Connect(t, s.ClientURL())
-	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}})
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	proxy := testutil.StartProxy(t, strings.TrimPrefix(s.ClientURL(), "nats://"))
 	addr, adminAddr := freePort(t), freePort(t)
 	g := jetStreamGateway(t, []string{"nats://" + proxy.Addr()},
@@ -299,7 +299,7 @@ func TestFailoverLosesNoAcknowledgedEvent(t *testing.T) {
 	}
 	c := testutil.RunCluster(t, 3)
 	_, js := testutil.Connect(t, c.URLs()...)
-	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Replicas: 3, Duplicates: time.Minute})
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew, Replicas: 3, Duplicates: time.Minute})
 	g := jetStreamGateway(t, c.URLs(), "", "        attempt_timeout: 1s\n        timeout: 4s\n")
 	closeGateway(t, g)
 	waitReady(t, g)
@@ -335,7 +335,7 @@ func TestFailoverLosesNoAcknowledgedEvent(t *testing.T) {
 func TestStandardWebhooksEventToJetStream(t *testing.T) {
 	s := testutil.RunServer(t)
 	_, js := testutil.Connect(t, s.ClientURL())
-	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}})
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	key := []byte("0123456789abcdef0123456789abcdef")
 	t.Setenv("SW_SECRET", "whsec_"+base64.StdEncoding.EncodeToString(key))
 	cfg, err := config.Parse([]byte(`
@@ -399,7 +399,7 @@ func TestReconnectRechecksDestination(t *testing.T) {
 	port := testutil.FreePort(t)
 	first := testutil.RunServer(t, func(o *server.Options) { o.Port = port })
 	_, js := testutil.Connect(t, first.ClientURL())
-	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}})
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	g := jetStreamGateway(t, []string{first.ClientURL()}, "", "")
 	closeGateway(t, g)
 	waitReady(t, g)
@@ -426,13 +426,26 @@ func TestReconnectRechecksDestination(t *testing.T) {
 	}
 }
 
-// A malformed event ID that a Standard Webhooks check rejects gets 400, not reject_status.
-func TestRepeatedSignedEventIDIs400(t *testing.T) {
+// A repeated signed event ID gets 400 from a JetStream source, which would publish it, and the configured
+// reject_status from an HTTP source.
+func TestRepeatedSignedEventID(t *testing.T) {
+	s := testutil.RunServer(t)
+	_, js := testutil.Connect(t, s.ClientURL())
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	t.Setenv("SW_SECRET", "whsec_"+base64.StdEncoding.EncodeToString([]byte("0123456789abcdef0123456789abcdef")))
 	cfg, err := config.Parse([]byte(`
+connections:
+  ev:
+    nats: {urls: ["` + s.ClientURL() + `"], none: true}
 sources:
-  - name: s
-    path: /e
+  - name: js
+    path: /js
+    max_body_bytes: 65536
+    checks: [{standard_webhooks: {secrets: [{env: SW_SECRET}]}}]
+    output: {jetstream: {connection: ev, stream: EVENTS}}
+  - name: http
+    path: /http
+    reject_status: 403
     checks: [{standard_webhooks: {secrets: [{env: SW_SECRET}]}}]
     output: {http: {urls: ["http://127.0.0.1:1/"]}}
 `))
@@ -441,14 +454,18 @@ sources:
 	}
 	g := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	closeGateway(t, g)
-	r := httptest.NewRequest(http.MethodPost, "/e", strings.NewReader("{}"))
-	r.Header["Webhook-Id"] = []string{"a", "b"}
-	r.Header.Set("Webhook-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
-	r.Header.Set("Webhook-Signature", "v1,x")
-	w := httptest.NewRecorder()
-	g.ServeHTTP(w, r)
-	if w.Code != 400 {
-		t.Errorf("repeated webhook-id: %d", w.Code)
+	jsSource := g.routes["/js"].any
+	testutil.Eventually(t, 15*time.Second, func() bool { return jsSource.out.Ready() == nil }, "source not ready")
+	for path, want := range map[string]int{"/js": 400, "/http": 403} {
+		r := httptest.NewRequest(http.MethodPost, path, strings.NewReader("{}"))
+		r.Header["Webhook-Id"] = []string{"a", "b"}
+		r.Header.Set("Webhook-Timestamp", strconv.FormatInt(time.Now().Unix(), 10))
+		r.Header.Set("Webhook-Signature", "v1,x")
+		w := httptest.NewRecorder()
+		g.ServeHTTP(w, r)
+		if w.Code != want {
+			t.Errorf("%s: repeated webhook-id got %d, want %d", path, w.Code, want)
+		}
 	}
 }
 

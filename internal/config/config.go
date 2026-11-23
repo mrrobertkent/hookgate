@@ -268,7 +268,41 @@ func (s *Source) validate(where string) []error {
 	if len(s.Checks) == 0 {
 		errs = append(errs, fmt.Errorf("%s: at least one check is required (a source never forwards unverified requests)", where))
 	}
+	errs = append(errs, s.validateIDHeaders(where)...)
 	return append(errs, validateChecks(where, s.Checks)...)
+}
+
+// eventIDHeaders names the request headers a check authenticates an event ID from.
+func (s *Source) eventIDHeaders() []string {
+	var out []string
+	for _, ch := range s.Checks {
+		if sw := ch.StandardWebhooks; sw != nil {
+			out = append(out, standardWebhooksHeader(sw.Headers, "id"))
+		}
+	}
+	return out
+}
+
+// standardWebhooksHeader names a header of a Standard Webhooks family ("standard" or "svix").
+func standardWebhooksHeader(family, part string) string {
+	if family == "svix" {
+		return "svix-" + part
+	}
+	return "webhook-" + part
+}
+
+// validateIDHeaders rejects a token or HMAC check that reads the header an event ID is authenticated from: the
+// secret would be published as the event ID.
+func (s *Source) validateIDHeaders(where string) []error {
+	var errs []error
+	for _, id := range s.eventIDHeaders() {
+		for _, ch := range s.Checks {
+			if (ch.Token != nil && strings.EqualFold(ch.Token.Header, id)) || (ch.HMAC != nil && strings.EqualFold(ch.HMAC.Header, id)) {
+				errs = append(errs, fmt.Errorf("%s: a token or hmac check reads %s, which carries the event ID", where, id))
+			}
+		}
+	}
+	return errs
 }
 
 // CredentialHeaders names the request headers the source's checks read secrets or signatures from. Outputs
@@ -281,10 +315,8 @@ func (s *Source) CredentialHeaders() []string {
 			out = append(out, ch.Token.Header)
 		case ch.HMAC != nil:
 			out = append(out, ch.HMAC.Header)
-		case ch.StandardWebhooks != nil && ch.StandardWebhooks.Headers == "svix":
-			out = append(out, "svix-signature")
 		case ch.StandardWebhooks != nil:
-			out = append(out, "webhook-signature")
+			out = append(out, standardWebhooksHeader(ch.StandardWebhooks.Headers, "signature"))
 		}
 	}
 	return out

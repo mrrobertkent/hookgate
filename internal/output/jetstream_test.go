@@ -101,10 +101,8 @@ func buildOn(t *testing.T, c *natsconn.Conn, src config.Source) *jetStreamOutput
 func checkNow(o *jetStreamOutput) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	o.mu.Lock()
-	gen := o.gen
-	o.mu.Unlock()
-	o.setCheck(o.check(ctx), gen)
+	tag := o.nc.Stats().Reconnects
+	o.setCheck(o.check(ctx), tag)
 }
 
 func event(body string, h http.Header) Event {
@@ -145,7 +143,8 @@ func streamMsgs(t *testing.T, js jetstream.JetStream, stream string) []*jetstrea
 
 func eventsStream(t *testing.T, js jetstream.JetStream, mutate ...func(*jetstream.StreamConfig)) {
 	t.Helper()
-	cfg := jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Duplicates: time.Minute, MaxAge: time.Hour}
+	cfg := jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Duplicates: time.Minute, MaxAge: time.Hour,
+		Discard: jetstream.DiscardNew}
 	for _, m := range mutate {
 		m(&cfg)
 	}
@@ -295,7 +294,7 @@ func TestBrokerDownAnswers503(t *testing.T) {
 func TestWrongStreamAnswers503(t *testing.T) {
 	s := testutil.RunServer(t)
 	_, js := testutil.Connect(t, s.ClientURL())
-	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "OTHER", Subjects: []string{"webhooks.events.>"}})
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "OTHER", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	eventsStream(t, js, func(c *jetstream.StreamConfig) { c.Subjects = []string{"elsewhere.>"} })
 	o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1024", ""))
 	if err := o.Ready(); err != nil {
@@ -464,6 +463,8 @@ func TestNotReadyChecks(t *testing.T) {
 		{"stream missing", 0, nil, noChange, "stream EVENTS not found"},
 		{"interest retention", 0, func(c *jetstream.StreamConfig) { c.Retention = jetstream.InterestPolicy }, noChange, "retention"},
 		{"stream without acks", 0, func(c *jetstream.StreamConfig) { c.NoAck = true }, noChange, "no_ack"},
+		{"stream discard old", 0, func(c *jetstream.StreamConfig) { c.Discard = jetstream.DiscardOld }, noChange, "discard"},
+		{"bucket fewer replicas", 0, func(c *jetstream.StreamConfig) { c.Replicas = 1 }, func(c *jetstream.StreamConfig) { c.MaxAge = 27 * time.Hour; c.Storage = jetstream.MemoryStorage }, "durably"},
 		{"bucket without acks", 0, noChange, func(c *jetstream.StreamConfig) { c.NoAck = true }, "no_ack"},
 		{"server max_payload", 16 << 10, noChange, noChange, "exceed"},
 		{"stream max_msg_size", 0, func(c *jetstream.StreamConfig) { c.MaxMsgSize = 20 << 10 }, noChange, "exceed"},
@@ -636,4 +637,66 @@ func TestLostPubAckIsRetried(t *testing.T) {
 	if n := len(streamMsgs(t, js, "EVENTS")); n < 3 {
 		t.Errorf("without an ID: %d messages, want the event stored again by the retry", n)
 	}
+}
+
+// After a reconnect the claim is stored again before its reference is published, because the server now
+// serving the client may not hold what the previous one stored.
+func TestClaimStoredAgainAfterReconnect(t *testing.T) {
+	s := testutil.RunServer(t)
+	_, admin := testutil.Connect(t, s.ClientURL())
+	eventsStream(t, admin)
+	obs := testutil.CreateBucket(t, admin, jetstream.ObjectStoreConfig{Bucket: "CLAIMS"})
+	proxy := testutil.StartProxy(t, strings.TrimPrefix(s.ClientURL(), "nats://"))
+	url := "nats://" + proxy.Addr()
+	o := build(t, url, sourceConfig(t, url, "none: true", "1048576", claimed))
+	body := bigBody(5000)
+	sum := sha256.Sum256([]byte(body))
+	sha := hex.EncodeToString(sum[:])
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := &claim{ctx: ctx, o: o, key: "src/" + sha, body: []byte(body), sha: sha}
+	h := nats.Header{}
+	if err := c.prepare(h); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.prepare(h); err != nil {
+		t.Fatal(err)
+	}
+	// The object vanishes, as on a replacement server, and the client reconnects.
+	if err := obs.Delete(ctx, "src/"+sha); err != nil {
+		t.Fatal(err)
+	}
+	before := o.nc.Stats().Reconnects
+	proxy.DropConnections()
+	testutil.Eventually(t, 10*time.Second, func() bool { return o.nc.Stats().Reconnects > before && o.nc.IsConnected() }, "no reconnect")
+	if err := c.prepare(h); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := obs.GetBytes(ctx, h.Get(contract.HeaderClaimKey)); err != nil || string(got) != body {
+		t.Errorf("object after reconnect: %v", err)
+	}
+}
+
+// A ready source keeps checking, so a stream changed under it stops publishes.
+func TestReadySourceRechecks(t *testing.T) {
+	s := testutil.RunServer(t)
+	_, js := testutil.Connect(t, s.ClientURL())
+	eventsStream(t, js)
+	o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1024", ""))
+	o.recheckReady = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { o.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	testutil.Eventually(t, 5*time.Second, func() bool { return o.Ready() == nil }, "not ready")
+	uctx, ucancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer ucancel()
+	if _, err := js.UpdateStream(uctx, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"},
+		Duplicates: time.Minute, MaxAge: time.Hour, Discard: jetstream.DiscardOld}); err != nil {
+		t.Fatal(err)
+	}
+	testutil.Eventually(t, 5*time.Second, func() bool {
+		err := o.Ready()
+		return err != nil && strings.Contains(err.Error(), "discard")
+	}, "still ready after the stream changed")
 }

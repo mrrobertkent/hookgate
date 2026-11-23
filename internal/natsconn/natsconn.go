@@ -68,7 +68,7 @@ func Connect(name string, cfg config.NATSConnection, log *slog.Logger, cb Callba
 		}
 	}
 	connected := func(nc *nats.Conn) {
-		log.Info("nats connected", "connection", name, "server", nc.ConnectedUrlRedacted())
+		log.Info("nats connected", "connection", name, "server", config.RedactURL(nc.ConnectedUrl()))
 		state(true)
 		if cb.Connected != nil {
 			cb.Connected(nc)
@@ -109,17 +109,36 @@ func Connect(name string, cfg config.NATSConnection, log *slog.Logger, cb Callba
 }
 
 // Drain stops new subscriptions and publishes, flushes what is pending, closes the connection and waits until it
-// is closed or ctx ends; then it closes the connection at once and returns ctx's error.
+// is closed or ctx ends. When ctx ends first it starts closing the connection at once and returns ctx's error
+// without waiting further: a client stuck in a reconnect handshake may hold its lock for up to connect_timeout.
 func (c *Conn) Drain(ctx context.Context) error {
-	if err := c.Conn.Drain(); err != nil && !errors.Is(err, nats.ErrConnectionClosed) {
-		c.Close()
-		return err
+	started := make(chan error, 1)
+	go func() {
+		err := c.Conn.Drain()
+		switch {
+		case err == nil, errors.Is(err, nats.ErrConnectionClosed):
+			started <- nil
+		case errors.Is(err, nats.ErrConnectionReconnecting):
+			started <- nil // Drain closed the connection: nothing was in flight on it
+		default:
+			c.Close()
+			started <- err
+		}
+	}()
+	select {
+	case err := <-started:
+		if err != nil {
+			return err
+		}
+	case <-ctx.Done():
+		go c.Close()
+		return ctx.Err()
 	}
 	select {
 	case <-c.closed:
 		return nil
 	case <-ctx.Done():
-		c.Close()
+		go c.Close()
 		return ctx.Err()
 	}
 }
