@@ -96,3 +96,94 @@ func TestLoad(t *testing.T) {
 		t.Error("Load of a missing file succeeded")
 	}
 }
+
+func source(name, hosts, path string) string {
+	return "  - name: " + name + "\n    hosts: " + hosts + "\n    path: " + path +
+		"\n    checks: [{token: {header: X, secrets: [{env: K}]}}]\n    forward: {urls: [http://u]}\n"
+}
+
+func TestRouteUniqueness(t *testing.T) {
+	cases := []struct {
+		name    string
+		sources string
+		wantErr string
+	}{
+		{"host-less and hosted share a path", source("a", "[]", "/e") + source("b", "[x.example]", "/e"), ""},
+		{"same host on different paths", source("a", "[x.example]", "/e") + source("b", "[x.example]", "/f"), ""},
+		{"different hosts on one path", source("a", "[x.example]", "/e") + source("b", "[y.example]", "/e"), ""},
+		{"two host-less sources on one path", source("a", "[]", "/e") + source("b", "[]", "/e"),
+			`source "b": path /e without hosts is already used by source "a"`},
+		{"shared host on one path", source("a", "[x.example, y.example]", "/e") + source("b", "[z.example, Y.Example.]", "/e"),
+			`source "b": host y.example on path /e is already used by source "a"`},
+		{"host listed twice", source("a", "[x.example, X.EXAMPLE]", "/e"),
+			`source "a": host x.example on path /e is already used by source "a"`},
+	}
+	for _, c := range cases {
+		_, err := Parse([]byte("sources:\n" + c.sources))
+		switch {
+		case c.wantErr == "" && err != nil:
+			t.Errorf("%s: %v", c.name, err)
+		case c.wantErr != "" && (err == nil || !strings.Contains(err.Error(), c.wantErr)):
+			t.Errorf("%s: got %v, want %q", c.name, err, c.wantErr)
+		}
+	}
+}
+
+func TestNormalizeHost(t *testing.T) {
+	ok := map[string]string{
+		"example.com":                  "example.com",
+		"Hooks.Example.COM":            "hooks.example.com",
+		"example.com.":                 "example.com",
+		"xn--bcher-kva.example":        "xn--bcher-kva.example",
+		"localhost":                    "localhost",
+		"a-b.c1":                       "a-b.c1",
+		"192.0.2.1":                    "192.0.2.1",
+		"::1":                          "::1",
+		"[::1]":                        "::1",
+		"[2001:DB8:0:0:0:0:0:1]":       "2001:db8::1",
+		"2001:0db8::0001":              "2001:db8::1",
+		strings.Repeat("a", 63) + ".x": strings.Repeat("a", 63) + ".x",
+	}
+	for in, want := range ok {
+		if got, err := NormalizeHost(in); err != nil || got != want {
+			t.Errorf("NormalizeHost(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{
+		"", ".", "*", "*.example.com", "example.*", "example.com:443", "[::1]:443", "192.0.2.1:80", "[::1", "[192.0.2.1]",
+		"fe80::1%eth0", "[fe80::1%25eth0]", "exa mple.com", "under_score.example", "-lead.example", "trail-.example",
+		"a..b", "example.com..", "bücher.example", "http://example.com", "example.com/path",
+		strings.Repeat("a", 64) + ".x", strings.Repeat("a.", 127) + "aa",
+	} {
+		if got, err := NormalizeHost(in); err == nil {
+			t.Errorf("NormalizeHost(%q) = %q, want an error", in, got)
+		}
+	}
+}
+
+func TestHostsAreNormalisedInPlace(t *testing.T) {
+	c, err := Parse([]byte("sources:\n" + source("a", "[Hooks.Example.COM., \"[::1]\"]", "/e")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Sources[0].Hosts; len(got) != 2 || got[0] != "hooks.example.com" || got[1] != "::1" {
+		t.Errorf("hosts %q", got)
+	}
+}
+
+func TestSourceNames(t *testing.T) {
+	for _, name := range []string{"a", "0", "resend", "github-app_2", strings.Repeat("a", 63)} {
+		if _, err := Parse([]byte("sources:\n" + source(name, "[]", "/e"))); err != nil {
+			t.Errorf("name %q: %v", name, err)
+		}
+	}
+	for _, name := range []string{`""`, "GitHub", "-a", "_a", "a.b", "a:b", "a/b", "a b", "ä", strings.Repeat("a", 64)} {
+		if _, err := Parse([]byte("sources:\n" + source(name, "[]", "/e"))); err == nil {
+			t.Errorf("name %q: accepted", name)
+		}
+	}
+	if _, err := Parse([]byte("sources:\n" + source("a", "[]", "/e") + source("a", "[]", "/f"))); err == nil ||
+		!strings.Contains(err.Error(), "duplicate name") {
+		t.Errorf("duplicate name: %v", err)
+	}
+}

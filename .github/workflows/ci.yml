@@ -22,6 +22,8 @@ jobs:
       - run: go test -race -count=1 -coverprofile=coverage.out ./...
       - name: Fuzz the signature verifier
         run: go test -run='^$' -fuzz=FuzzHMAC -fuzztime=60s ./internal/verify
+      - name: Fuzz host normalisation
+        run: go test -run='^$' -fuzz=FuzzHost -fuzztime=30s ./internal/gateway
       - name: Validate the example configuration
         env:
           E2_WEBHOOK_TOKEN: example-token-value

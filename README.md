@@ -41,7 +41,7 @@ flowchart LR
     G -.->|forged, missing or oversized| X[rejected, never forwarded]
 ```
 
-1. The request path selects a source; anything else is `404`.
+1. The request path, and the host when the source lists hosts, selects a source; anything else is `404`.
 2. Method, query string, encoding and body size are checked (`405`, `400`, `415`, `413`).
 3. Every check of the source runs against the raw body. A failure returns `401` and nothing is forwarded.
 4. The verified bytes go upstream. Transport errors and `5xx` responses retry on the next instance; the upstream's response goes back to the sender.
