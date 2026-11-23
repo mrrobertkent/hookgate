@@ -264,6 +264,12 @@ func (l *eventLoad) record(id string, code int) {
 	}
 }
 
+func (l *eventLoad) afterKill() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.ackedAfterKill
+}
+
 func (l *eventLoad) markKilled() {
 	l.mu.Lock()
 	l.killed = true
@@ -304,7 +310,11 @@ func TestFailoverLosesNoAcknowledgedEvent(t *testing.T) {
 	leader := moveLeaderTo(t, c, g.conns["ev"].ConnectedServerName())
 	load.markKilled()
 	leader.Shutdown()
-	time.Sleep(4 * time.Second)
+	// The gateway reconnects (ReconnectWait plus jitter), re-checks the stream, and the stream elects a leader.
+	deadline := time.Now().Add(30 * time.Second)
+	for load.afterKill() < 100 && time.Now().Before(deadline) {
+		time.Sleep(100 * time.Millisecond)
+	}
 	stop()
 
 	if load.ackedAfterKill == 0 {
