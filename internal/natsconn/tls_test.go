@@ -26,7 +26,7 @@ import (
 
 type certPair struct{ cert, key []byte }
 
-func issue(t *testing.T, tmpl *x509.Certificate, parent *x509.Certificate, parentKey *ecdsa.PrivateKey) (certPair, *x509.Certificate, *ecdsa.PrivateKey) {
+func issue(t *testing.T, tmpl, parent *x509.Certificate, parentKey *ecdsa.PrivateKey) (certPair, *x509.Certificate, *ecdsa.PrivateKey) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
