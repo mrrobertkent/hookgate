@@ -33,7 +33,7 @@ sources:
     `+check+`
     forward: {urls: [`+srv.URL+`/fallback]}
   - name: hosted-only
-    hosts: [hooks.example.com]
+    hosts: [hooks.example.com, id.example.com]
     path: /only
     `+check+`
     forward: {urls: [`+srv.URL+`/hosted-only]}
@@ -76,6 +76,12 @@ sources:
 		{"::1", "/events", nil, "/fallback"},
 		{"[192.0.2.1]", "/events", nil, "/fallback"},
 		{"[fe80::1%25eth0]", "/events", nil, "/fallback"},
+		// strings.ToLower maps U+0130 to "i" and U+212A (Kelvin) to "k": non-ASCII never matches a listed host.
+		{"HOOKS.EXAMPLE.COM", "/only", nil, "/hosted-only"},
+		{"id.example.com", "/only", nil, "/hosted-only"},
+		{"\u0130d.example.com", "/only", nil, ""},
+		{"hoo\u212as.example.com", "/only", nil, ""},
+		{"hooks.example.com\x80", "/only", nil, ""},
 	}
 	for _, c := range cases {
 		up.reqs = nil

@@ -156,7 +156,7 @@ func TestNormalizeHost(t *testing.T) {
 	for _, in := range []string{
 		"", ".", "*", "*.example.com", "example.*", "example.com:443", "[::1]:443", "192.0.2.1:80", "[::1", "[192.0.2.1]",
 		"fe80::1%eth0", "[fe80::1%25eth0]", "exa mple.com", "under_score.example", "-lead.example", "trail-.example",
-		"a..b", "example.com..", "bücher.example", "http://example.com", "example.com/path",
+		"a..b", "example.com..", "bücher.example", "İ.example", "\u212a.example", "example.com\x80", "http://example.com", "example.com/path",
 		strings.Repeat("a", 64) + ".x", strings.Repeat("a.", 127) + "aa",
 	} {
 		if got, err := NormalizeHost(in); err == nil {

@@ -16,6 +16,9 @@ func NormalizeHost(h string) (string, error) {
 	if h == "" {
 		return "", errors.New("host must not be empty")
 	}
+	if !isASCII(h) {
+		return "", errors.New("host must be ASCII; write internationalised names in punycode")
+	}
 	if strings.Contains(h, "*") {
 		return "", errors.New("host must be exact; wildcards are not supported")
 	}
@@ -41,6 +44,16 @@ func NormalizeHost(h string) (string, error) {
 		return "", errors.New("host must be a DNS name (letters, digits and hyphens; IDNs in punycode) or an IP address")
 	}
 	return h, nil
+}
+
+// isASCII must gate strings.ToLower, which maps some non-ASCII letters to ASCII ones (U+0130 to "i").
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // isDNSName reports whether lowercase h is a host name under RFC 1123: dot-separated labels of 1-63 letters,

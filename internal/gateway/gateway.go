@@ -109,9 +109,14 @@ func (g *Gateway) match(r *http.Request) *source {
 
 // requestHost normalises a request authority the way config.NormalizeHost normalises configured hosts:
 // lowercase, port and IPv6 brackets removed, one trailing dot removed, IP literals in canonical form. It
-// reports false for a malformed authority (a non-numeric or overlong port, unbalanced brackets, brackets
+// reports false for a malformed authority (non-ASCII bytes, a non-numeric or overlong port, unbalanced brackets, brackets
 // around anything but an IPv6 address without a zone, a bare IPv6 address), which then matches no listed host.
 func requestHost(authority string) (string, bool) {
+	for i := 0; i < len(authority); i++ {
+		if authority[i] >= 0x80 { // strings.ToLower would map some non-ASCII letters to ASCII ones
+			return "", false
+		}
+	}
 	host, ok := splitAuthority(strings.ToLower(authority))
 	if !ok {
 		return "", false
