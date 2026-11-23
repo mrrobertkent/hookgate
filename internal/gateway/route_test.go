@@ -59,6 +59,23 @@ sources:
 		{"hooks.example.com", "/only", nil, "/hosted-only"},
 		{"other.example.com", "/only", nil, ""},
 		{"hooks.example.com", "/elsewhere", nil, ""},
+		{"hooks.example.com:", "/only", nil, "/hosted-only"},
+		// Malformed authorities match no listed host: 404 where the path has no source without hosts.
+		{"hooks.example.com:abc", "/only", nil, ""},
+		{"hooks.example.com:443:443", "/only", nil, ""},
+		{"hooks.example.com:123456", "/only", nil, ""},
+		{"[hooks.example.com]:443", "/only", nil, ""},
+		{"[hooks.example.com]", "/only", nil, ""},
+		{"hooks.example.com]", "/only", nil, ""},
+		{"[::1", "/only", nil, ""},
+		// ...and fall back to the source without hosts where the path has one.
+		{"hooks.example.com:abc", "/events", nil, "/fallback"},
+		{"[::1", "/events", nil, "/fallback"},
+		{"[::1]]", "/events", nil, "/fallback"},
+		{"[::1]x", "/events", nil, "/fallback"},
+		{"::1", "/events", nil, "/fallback"},
+		{"[192.0.2.1]", "/events", nil, "/fallback"},
+		{"[fe80::1%25eth0]", "/events", nil, "/fallback"},
 	}
 	for _, c := range cases {
 		up.reqs = nil
@@ -71,17 +88,14 @@ sources:
 		w := httptest.NewRecorder()
 		g.ServeHTTP(w, r)
 		switch {
-		case c.want == "" && w.Code != http.StatusNotFound:
-			t.Errorf("%s %s: got %d, want 404", c.host, c.path, w.Code)
+		case c.want == "" && (w.Code != http.StatusNotFound || len(up.reqs) != 0):
+			t.Errorf("%s %s: got %d with %d upstream requests, want 404 and none", c.host, c.path, w.Code, len(up.reqs))
 		case c.want == "":
 		case w.Code != http.StatusOK || len(up.reqs) != 1:
 			t.Errorf("%s %s: got %d with %d upstream requests", c.host, c.path, w.Code, len(up.reqs))
 		case up.reqs[0].URL.Path != c.want:
 			t.Errorf("%s %s: routed to %s, want %s", c.host, c.path, up.reqs[0].URL.Path, c.want)
 		}
-	}
-	if len(up.reqs) != 0 {
-		t.Errorf("unmatched request reached upstream")
 	}
 }
 
@@ -102,13 +116,16 @@ sources:
 }
 
 // FuzzHost checks that every spelling of an accepted configured host that a client may send (any case, a
-// port, IPv6 brackets, a trailing dot) normalises to the configured form, and that normalising never panics.
+// port, IPv6 brackets, a trailing dot on a name) normalises to the configured form, and that normalising never
+// panics.
 func FuzzHost(f *testing.F) {
-	for _, s := range []string{"example.com", "Example.COM.", "[::1]", "::1", "192.0.2.1", "[::1]:80", "a:b", "*.x", ""} {
+	for _, s := range []string{"example.com", "Example.COM.", "[::1]", "::1", "192.0.2.1", "[::1]:80", "a:b", "*.x", "", "[x]:1", "[::1"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, h string) {
-		_ = requestHost(h)
+		if got, ok := requestHost(h); !ok && got != "" {
+			t.Fatalf("requestHost(%q) = %q, false", h, got)
+		}
 		n, err := config.NormalizeHost(h)
 		if err != nil {
 			return
@@ -116,10 +133,21 @@ func FuzzHost(f *testing.F) {
 		if again, err := config.NormalizeHost(n); err != nil || again != n {
 			t.Fatalf("NormalizeHost(%q) = %q, then %q, %v", h, n, again, err)
 		}
-		for _, sent := range []string{n, strings.ToUpper(n), net.JoinHostPort(n, "443"), net.JoinHostPort(strings.ToUpper(n), "1"), n + "."} {
-			if got := requestHost(sent); got != n {
-				t.Fatalf("configured %q (normalised %q): request host %q normalises to %q", h, n, sent, got)
-			}
+		lit := n
+		if strings.Contains(n, ":") {
+			lit = "[" + n + "]"
+		} else {
+			checkSent(t, n, n+".")
+		}
+		for _, sent := range []string{lit, strings.ToUpper(lit), net.JoinHostPort(n, "443"), net.JoinHostPort(strings.ToUpper(n), "1"), lit + ":"} {
+			checkSent(t, n, sent)
 		}
 	})
+}
+
+func checkSent(t *testing.T, want, sent string) {
+	t.Helper()
+	if got, ok := requestHost(sent); !ok || got != want {
+		t.Fatalf("configured %q: request host %q normalises to %q, %v", want, sent, got, ok)
+	}
 }

@@ -22,8 +22,8 @@ Each entry of `sources` is one sender.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `name` | required | Label used in logs and metrics. Lowercase letters, digits, `-` and `_`, starting with a letter or digit, at most 63 characters (`[a-z0-9][a-z0-9_-]{0,62}`); unique. |
-| `hosts` | none | Exact host names or IP addresses this source answers, for example `[hooks.example.com]`. None means any host. See [Routing](#routing). |
+| `name` | required | Label used in logs and metrics. Letters, digits, `-` and `_`, starting with a letter or digit, at most 63 characters (`[A-Za-z0-9][A-Za-z0-9_-]{0,62}`); unique. |
+| `hosts` | none | Exact host names or IP addresses this source answers, for example `[hooks.example.com]`. Omitted means any host; an empty or null list, or a null entry, is a configuration error. See [Routing](#routing). |
 | `path` | required | Exact request path, for example `/github`. |
 | `max_body_bytes` | `1048576` | Larger bodies get `413` and are never forwarded. |
 | `allow_query` | `false` | Requests with a query string get `400` unless set: query parameters are not covered by signatures. |
@@ -33,10 +33,11 @@ Each entry of `sources` is one sender.
 
 ### Routing
 
-A request goes to the source whose `path` equals the request path exactly and that either lists the request's host in `hosts` or has no `hosts`. A source that lists the host beats the path's source without `hosts`. Any other request gets `404`.
+A request goes to the source whose `path` equals the decoded request path exactly and that either lists the request's host in `hosts` or has no `hosts`. A source that lists the host beats the path's source without `hosts`. Any other request gets `404`.
 
 - Each (host, path) pair belongs to one source: two sources without `hosts` on one path, or two sources listing the same host on one path, stop startup. A source without `hosts` and sources with `hosts` may share a path.
-- The host comes from the `Host` header (`:authority` in HTTP/2), never from `X-Forwarded-Host`. It is compared case-insensitively, without its port and without one trailing dot; IP addresses are compared in canonical form, so `[::1]:8080` matches `::1`.
+- The host is the request's effective authority: the authority of an absolute-form request target (`POST http://host/path HTTP/1.1`) when present, else the `Host` header, or `:authority` in HTTP/2. `X-Forwarded-Host` is never read, so a proxy in front must pass the client's `Host` through (Traefik: `passHostHeader`, true by default).
+- The host is compared case-insensitively, without its port and without one trailing dot; IP addresses are compared in canonical form, so `[::1]:8080` matches `::1`. A malformed authority (a port that is not up to five digits, unbalanced brackets, brackets around anything but an IPv6 address, an unbracketed IPv6 address) matches no listed host: it reaches the path's source without `hosts` if there is one, else gets `404`.
 - In `hosts`, write DNS names as letters, digits and hyphens (internationalised names in punycode, `xn--…`), and IPv6 addresses with or without brackets, quoted in YAML: `hosts: ["::1"]`. Names are lowercased and one trailing dot is dropped. Wildcards, ports and IPv6 zones are configuration errors.
 
 The precedence matches nginx, where a `server_name` that equals the host wins over the port's default server ([nginx: server names](https://nginx.org/en/docs/http/server_names.html)). Traefik instead orders routers by priority, by default the length of the rule ([Traefik: rules and priority](https://doc.traefik.io/traefik/reference/routing-configuration/http/routing/rules-and-priority/#priority-calculation)): give each exact host and path its own router to hookgate rather than a catch-all. hookgate repeats the host match, so a request the proxy misroutes never reaches a source that lists other hosts.

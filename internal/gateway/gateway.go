@@ -91,33 +91,69 @@ func (g *Gateway) add(s *source) {
 	}
 }
 
-// match selects the source for a request: the path must match exactly, and a source listing the request's
-// host beats the path's source without hosts. Only Host (HTTP/2 :authority) counts, never X-Forwarded-Host.
+// match selects the source for a request: the decoded path must match exactly, and a source listing the
+// request's host beats the path's source without hosts. The host is r.Host, the effective authority (the
+// absolute-form request target, else Host; :authority in HTTP/2), never X-Forwarded-Host.
 func (g *Gateway) match(r *http.Request) *source {
 	rt := g.routes[r.URL.Path]
 	if rt == nil {
 		return nil
 	}
-	if s := rt.hosts[requestHost(r.Host)]; s != nil {
-		return s
+	if h, ok := requestHost(r.Host); ok {
+		if s := rt.hosts[h]; s != nil {
+			return s
+		}
 	}
 	return rt.any
 }
 
-// requestHost normalises a Host header value the way config.NormalizeHost normalises configured hosts:
-// lowercase, port and IPv6 brackets removed, one trailing dot removed, IP literals in canonical form.
-func requestHost(h string) string {
-	h = strings.ToLower(h)
-	if host, _, err := net.SplitHostPort(h); err == nil {
-		h = host
-	} else if inner, ok := strings.CutPrefix(h, "["); ok {
-		h = strings.TrimSuffix(inner, "]")
+// requestHost normalises a request authority the way config.NormalizeHost normalises configured hosts:
+// lowercase, port and IPv6 brackets removed, one trailing dot removed, IP literals in canonical form. It
+// reports false for a malformed authority (a non-numeric or overlong port, unbalanced brackets, brackets
+// around anything but an IPv6 address without a zone, a bare IPv6 address), which then matches no listed host.
+func requestHost(authority string) (string, bool) {
+	host, ok := splitAuthority(strings.ToLower(authority))
+	if !ok {
+		return "", false
 	}
-	h = strings.TrimSuffix(h, ".")
-	if a, err := netip.ParseAddr(h); err == nil {
-		return a.String()
+	if v6, ok := strings.CutPrefix(host, "["); ok {
+		a, err := netip.ParseAddr(strings.TrimSuffix(v6, "]"))
+		if err != nil || !a.Is6() || a.Zone() != "" {
+			return "", false
+		}
+		return a.String(), true
 	}
-	return h
+	if strings.ContainsAny(host, ":[]") {
+		return "", false
+	}
+	host = strings.TrimSuffix(host, ".")
+	if a, err := netip.ParseAddr(host); err == nil {
+		return a.String(), true
+	}
+	return host, true
+}
+
+// splitAuthority drops the port from host[:port] or [v6][:port] (RFC 3986: the port is up to five digits,
+// possibly none), keeping the brackets for requestHost to check.
+func splitAuthority(a string) (string, bool) {
+	host, port := a, ""
+	if strings.HasPrefix(a, "[") {
+		end := strings.IndexByte(a, ']')
+		if end < 0 {
+			return "", false
+		}
+		host, port = a[:end+1], a[end+1:]
+		if port != "" && port[0] != ':' {
+			return "", false
+		}
+	} else if i := strings.LastIndexByte(a, ':'); i >= 0 {
+		host, port = a[:i], a[i:]
+	}
+	port = strings.TrimPrefix(port, ":")
+	if len(port) > 5 || strings.Trim(port, "0123456789") != "" {
+		return "", false
+	}
+	return host, true
 }
 
 // ServeHTTP handles webhook requests.

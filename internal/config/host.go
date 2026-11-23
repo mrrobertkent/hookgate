@@ -2,8 +2,11 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // NormalizeHost returns the form of a configured host that requests are matched against: lowercase, without
@@ -47,15 +50,70 @@ func isDNSName(h string) bool {
 		return false
 	}
 	for label := range strings.SplitSeq(h, ".") {
-		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+		if !isDNSLabel(label) {
 			return false
-		}
-		for i := 0; i < len(label); i++ {
-			c := label[i]
-			if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '-' {
-				return false
-			}
 		}
 	}
 	return true
+}
+
+func isDNSLabel(l string) bool {
+	if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+		return false
+	}
+	return strings.Trim(l, "abcdefghijklmnopqrstuvwxyz0123456789-") == ""
+}
+
+// HostList is a source's hosts. Decoding rejects null and non-scalar entries and an explicitly empty or null
+// list: the YAML decoder would otherwise drop a null entry, and a list left with no hosts matches any host.
+type HostList []string
+
+// UnmarshalYAML implements yaml.Unmarshaler.
+func (l *HostList) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind != yaml.SequenceNode || len(n.Content) == 0 {
+		return fmt.Errorf("line %d: hosts must be a non-empty list; omit it to match any host", n.Line)
+	}
+	out := make(HostList, 0, len(n.Content))
+	for _, e := range n.Content {
+		if e.Kind != yaml.ScalarNode || e.ShortTag() == "!!null" {
+			return fmt.Errorf("line %d: each host must be a string", e.Line)
+		}
+		out = append(out, e.Value)
+	}
+	*l = out
+	return nil
+}
+
+// rejectNullHosts fails on a source whose hosts key is present but null (`hosts:` or `hosts: ~`), which the
+// decoder leaves indistinguishable from an absent key. raw has already decoded successfully.
+func rejectNullHosts(raw []byte) error {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		return err
+	}
+	if len(doc.Content) == 0 {
+		return nil
+	}
+	sources := mappingValue(doc.Content[0], "sources")
+	if sources == nil || sources.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for _, src := range sources.Content {
+		if h := mappingValue(src, "hosts"); h != nil && h.ShortTag() == "!!null" {
+			return fmt.Errorf("line %d: hosts must be a non-empty list; omit it to match any host", h.Line)
+		}
+	}
+	return nil
+}
+
+func mappingValue(m *yaml.Node, key string) *yaml.Node {
+	if m.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(m.Content); i += 2 {
+		if m.Content[i].Value == key {
+			return m.Content[i+1]
+		}
+	}
+	return nil
 }

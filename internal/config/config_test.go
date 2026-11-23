@@ -97,8 +97,12 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// source renders one source; hosts "" omits the key.
 func source(name, hosts, path string) string {
-	return "  - name: " + name + "\n    hosts: " + hosts + "\n    path: " + path +
+	if hosts != "" {
+		hosts = "\n    hosts: " + hosts
+	}
+	return "  - name: " + name + hosts + "\n    path: " + path +
 		"\n    checks: [{token: {header: X, secrets: [{env: K}]}}]\n    forward: {urls: [http://u]}\n"
 }
 
@@ -108,10 +112,10 @@ func TestRouteUniqueness(t *testing.T) {
 		sources string
 		wantErr string
 	}{
-		{"host-less and hosted share a path", source("a", "[]", "/e") + source("b", "[x.example]", "/e"), ""},
+		{"host-less and hosted share a path", source("a", "", "/e") + source("b", "[x.example]", "/e"), ""},
 		{"same host on different paths", source("a", "[x.example]", "/e") + source("b", "[x.example]", "/f"), ""},
 		{"different hosts on one path", source("a", "[x.example]", "/e") + source("b", "[y.example]", "/e"), ""},
-		{"two host-less sources on one path", source("a", "[]", "/e") + source("b", "[]", "/e"),
+		{"two host-less sources on one path", source("a", "", "/e") + source("b", "", "/e"),
 			`source "b": path /e without hosts is already used by source "a"`},
 		{"shared host on one path", source("a", "[x.example, y.example]", "/e") + source("b", "[z.example, Y.Example.]", "/e"),
 			`source "b": host y.example on path /e is already used by source "a"`},
@@ -172,18 +176,30 @@ func TestHostsAreNormalisedInPlace(t *testing.T) {
 }
 
 func TestSourceNames(t *testing.T) {
-	for _, name := range []string{"a", "0", "resend", "github-app_2", strings.Repeat("a", 63)} {
-		if _, err := Parse([]byte("sources:\n" + source(name, "[]", "/e"))); err != nil {
+	for _, name := range []string{"a", "0", "resend", "GitHub", "github-app_2", "B_2-x", strings.Repeat("a", 63)} {
+		if _, err := Parse([]byte("sources:\n" + source(name, "", "/e"))); err != nil {
 			t.Errorf("name %q: %v", name, err)
 		}
 	}
-	for _, name := range []string{`""`, "GitHub", "-a", "_a", "a.b", "a:b", "a/b", "a b", "ä", strings.Repeat("a", 64)} {
-		if _, err := Parse([]byte("sources:\n" + source(name, "[]", "/e"))); err == nil {
+	for _, name := range []string{`""`, "-a", "_a", "a.b", "a:b", "a/b", `"a b"`, `"a*"`, "a>", "ä", strings.Repeat("a", 64)} {
+		if _, err := Parse([]byte("sources:\n" + source(name, "", "/e"))); err == nil {
 			t.Errorf("name %q: accepted", name)
 		}
 	}
-	if _, err := Parse([]byte("sources:\n" + source("a", "[]", "/e") + source("a", "[]", "/f"))); err == nil ||
+	if _, err := Parse([]byte("sources:\n" + source("a", "", "/e") + source("a", "", "/f"))); err == nil ||
 		!strings.Contains(err.Error(), "duplicate name") {
 		t.Errorf("duplicate name: %v", err)
+	}
+}
+
+func TestHostsMustBeNonEmptyStrings(t *testing.T) {
+	for _, hosts := range []string{"[null]", "[~]", "[x.example, null]", "[[x.example]]", "[{a: b}]", "[]", "x.example", "null", "~", `""`} {
+		if c, err := Parse([]byte("sources:\n" + source("a", hosts, "/e"))); err == nil {
+			t.Errorf("hosts: %s accepted as %q", hosts, c.Sources[0].Hosts)
+		}
+	}
+	// An empty hosts: key (no value) is null too.
+	if _, err := Parse([]byte("sources:\n" + strings.Replace(source("a", "", "/e"), "    path:", "    hosts:\n    path:", 1))); err == nil {
+		t.Error("empty hosts key accepted")
 	}
 }

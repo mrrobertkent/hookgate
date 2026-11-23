@@ -32,7 +32,7 @@ type Config struct {
 // Source is one webhook sender: where it posts, how it proves itself, and where verified requests go.
 type Source struct {
 	Name         string   `yaml:"name"`
-	Hosts        []string `yaml:"hosts"` // exact names; none matches any host
+	Hosts        HostList `yaml:"hosts"` // exact names; none matches any host
 	Path         string   `yaml:"path"`
 	MaxBodyBytes int64    `yaml:"max_body_bytes"`
 	AllowQuery   bool     `yaml:"allow_query"`
@@ -96,6 +96,9 @@ func Parse(raw []byte) (*Config, error) {
 	dec := yaml.NewDecoder(bytes.NewReader(raw))
 	dec.KnownFields(true)
 	if err := dec.Decode(&c); err != nil {
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+	if err := rejectNullHosts(raw); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 	c.applyDefaults()
@@ -173,7 +176,7 @@ func (c *Config) validate() error {
 // route is one (host, path) pair a source answers; an empty host stands for the source without hosts.
 type route struct{ host, path string }
 
-var nameRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
+var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
 
 func validateName(where, name string, seen map[string]bool) []error {
 	var errs []error
