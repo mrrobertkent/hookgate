@@ -64,7 +64,7 @@ func TestToken(t *testing.T) {
 		{"repeated", hdr("X-Token", "current-token-value", "X-Token", "current-token-value"), false},
 	}
 	for _, c := range cases {
-		if err := v.Verify(c.h, nil); (err == nil) != c.ok {
+		if _, err := v.Verify(c.h, nil); (err == nil) != c.ok {
 			t.Errorf("%s: got err=%v, want ok=%v", c.name, err, c.ok)
 		}
 	}
@@ -146,12 +146,12 @@ func TestHMAC(t *testing.T) {
 			t.Fatal(err)
 		}
 		h := hdr("X-Sig", c.sig)
-		if err := v.Verify(h, []byte(c.body)); (err == nil) != c.ok {
+		if _, err := v.Verify(h, []byte(c.body)); (err == nil) != c.ok {
 			t.Errorf("%s: got err=%v, want ok=%v", c.name, err, c.ok)
 		}
 	}
 	v, _ := Build(config.Check{HMAC: &config.HMACCheck{Header: "X-Sig", Algorithm: "sha256", Encoding: "base64", Secrets: []config.SecretRef{{Env: "K1"}}}})
-	if err := v.Verify(hdr(), []byte(body)); err == nil {
+	if _, err := v.Verify(hdr(), []byte(body)); err == nil {
 		t.Error("missing signature header accepted")
 	}
 }

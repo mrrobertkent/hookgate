@@ -43,8 +43,9 @@ type Source struct {
 
 // Check is one verification step; exactly one of its fields is set. All checks of a source must pass.
 type Check struct {
-	Token *TokenCheck `yaml:"token"`
-	HMAC  *HMACCheck  `yaml:"hmac"`
+	Token            *TokenCheck            `yaml:"token"`
+	HMAC             *HMACCheck             `yaml:"hmac"`
+	StandardWebhooks *StandardWebhooksCheck `yaml:"standard_webhooks"`
 }
 
 // TokenCheck compares a request header with a shared secret.
@@ -61,6 +62,14 @@ type HMACCheck struct {
 	Prefix    string      `yaml:"prefix"`    // e.g. "sha256="; required on every signature when set
 	Separator string      `yaml:"separator"` // splits a header carrying several signatures
 	Secrets   []SecretRef `yaml:"secrets"`
+}
+
+// StandardWebhooksCheck verifies a Standard Webhooks signature: an HMAC-SHA256 over the event id, timestamp and
+// raw body, with the timestamp bounded in both directions.
+type StandardWebhooksCheck struct {
+	Headers   string         `yaml:"headers"`   // standard (webhook-*) | svix (svix-*)
+	Tolerance *time.Duration `yaml:"tolerance"` // largest accepted distance between the timestamp and now; nil until defaulted
+	Secrets   []SecretRef    `yaml:"secrets"`
 }
 
 // SecretRef names where a secret value comes from: an environment variable or a file.
@@ -142,10 +151,23 @@ func (c *Config) applyDefaults() {
 		if f.MaxAttempts == 0 {
 			f.MaxAttempts = 3
 		}
-		for _, ch := range s.Checks {
-			if ch.HMAC != nil && ch.HMAC.Encoding == "" {
-				ch.HMAC.Encoding = "hex"
-			}
+		for j := range s.Checks {
+			s.Checks[j].applyDefaults()
+		}
+	}
+}
+
+func (ch *Check) applyDefaults() {
+	if ch.HMAC != nil && ch.HMAC.Encoding == "" {
+		ch.HMAC.Encoding = "hex"
+	}
+	if sw := ch.StandardWebhooks; sw != nil {
+		if sw.Headers == "" {
+			sw.Headers = "standard"
+		}
+		if sw.Tolerance == nil {
+			d := 5 * time.Minute
+			sw.Tolerance = &d
 		}
 	}
 }
@@ -239,20 +261,42 @@ func (s *Source) validate(where string) []error {
 	if len(s.Checks) == 0 {
 		errs = append(errs, fmt.Errorf("%s: at least one check is required (a source never forwards unverified requests)", where))
 	}
-	for j, ch := range s.Checks {
-		errs = append(errs, ch.validate(fmt.Sprintf("%s checks[%d]", where, j))...)
-	}
+	errs = append(errs, validateChecks(where, s.Checks)...)
 	return append(errs, s.Forward.validate(where)...)
 }
 
+// validateChecks also allows at most one check that authenticates an event id, so a source has one event id.
+func validateChecks(where string, checks []Check) []error {
+	var errs []error
+	ids := 0
+	for j, ch := range checks {
+		errs = append(errs, ch.validate(fmt.Sprintf("%s checks[%d]", where, j))...)
+		if ch.StandardWebhooks != nil {
+			ids++
+		}
+	}
+	if ids > 1 {
+		errs = append(errs, fmt.Errorf("%s: at most one standard_webhooks check is allowed", where))
+	}
+	return errs
+}
+
 func (ch Check) validate(where string) []error {
+	set := 0
+	for _, kind := range []bool{ch.Token != nil, ch.HMAC != nil, ch.StandardWebhooks != nil} {
+		if kind {
+			set++
+		}
+	}
 	switch {
-	case ch.Token != nil && ch.HMAC != nil, ch.Token == nil && ch.HMAC == nil:
-		return []error{fmt.Errorf("%s: set exactly one of token, hmac", where)}
+	case set != 1:
+		return []error{fmt.Errorf("%s: set exactly one of token, hmac, standard_webhooks", where)}
 	case ch.Token != nil:
 		return ch.Token.validate(where)
-	default:
+	case ch.HMAC != nil:
 		return ch.HMAC.validate(where)
+	default:
+		return ch.StandardWebhooks.validate(where)
 	}
 }
 
@@ -303,6 +347,17 @@ func (f *Forward) validate(where string) []error {
 		errs = append(errs, fmt.Errorf("%s: forward.max_attempts must be >= 1", where))
 	}
 	return errs
+}
+
+func (sw *StandardWebhooksCheck) validate(where string) []error {
+	var errs []error
+	if sw.Headers != "standard" && sw.Headers != "svix" {
+		errs = append(errs, fmt.Errorf("%s: standard_webhooks.headers must be standard or svix", where))
+	}
+	if sw.Tolerance == nil || *sw.Tolerance <= 0 || *sw.Tolerance > time.Hour {
+		errs = append(errs, fmt.Errorf("%s: standard_webhooks.tolerance must be > 0 and <= 1h", where))
+	}
+	return append(errs, validateSecrets(where+" standard_webhooks", sw.Secrets)...)
 }
 
 func validateSecrets(where string, refs []SecretRef) []error {

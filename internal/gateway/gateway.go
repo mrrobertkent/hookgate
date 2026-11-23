@@ -279,7 +279,7 @@ func readBody(w http.ResponseWriter, r *http.Request, limit int64) ([]byte, *rej
 
 func (s *source) verify(r *http.Request, body []byte) *rejection {
 	for _, v := range s.verifiers {
-		if err := v.Verify(r.Header, body); err != nil {
+		if _, err := v.Verify(r.Header, body); err != nil {
 			return &rejection{s.cfg.RejectStatus, "rejected", err.Error(), []any{"bytes", len(body)}}
 		}
 	}

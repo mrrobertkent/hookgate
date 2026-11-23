@@ -26,7 +26,7 @@ Data pipelines are built to accept whatever arrives. A webhook endpoint in front
 
 hookgate closes that path:
 
-- **Verifies per sender.** Static tokens and HMAC-SHA1/256/512 signatures in hex, base64 or base64url, with prefixes and multi-signature headers. Every check of a source must pass.
+- **Verifies per sender.** Static tokens, HMAC-SHA1/256/512 signatures in hex, base64 or base64url with prefixes and multi-signature headers, and Standard Webhooks (Svix) signatures with timestamp checks. Every check of a source must pass.
 - **Fails closed.** A missing or too-short secret takes its own source offline (`503`), never open. Unknown config keys stop startup.
 - **Forwards exactly what it verified.** The upstream receives the verified bytes and an allowlist of headers, nothing else, with retries across instances.
 - **Costs almost nothing.** One ~16 MB distroless image, no database, no queue, Prometheus metrics built in.
@@ -149,6 +149,7 @@ Secrets are always references (`env:` or `file:`), never literals. The full refe
 |---|---|---|---|
 | `token` | constant-time compare of a header with a shared secret | — | several secrets for rotation |
 | `hmac` | HMAC-SHA1, HMAC-SHA256, HMAC-SHA512 over the raw body | hex, base64, base64url | `prefix` (`sha256=`), `separator` for multi-signature headers, several secrets for rotation |
+| `standard_webhooks` | HMAC-SHA256 over the event id, timestamp and raw body ([Standard Webhooks](https://www.standardwebhooks.com/) `v1`) | base64 | `webhook-*` or `svix-*` headers, timestamp `tolerance`, `whsec_` secrets, several secrets for rotation |
 
 ## Recipes
 
@@ -178,6 +179,31 @@ Secrets are always references (`env:` or `file:`), never literals. The full refe
 - token: {header: X-E2-Token, secrets: [{env: E2_TOKEN}]}
 - hmac: {header: X-E2-Notification-Signature, algorithm: sha256, encoding: base64, secrets: [{env: E2_SIGNING_SECRET}]}
 ```
+
+</details>
+
+<details>
+<summary><b>Sender</b>: Resend and other Standard Webhooks (Svix) senders</summary>
+
+Resend [signs with Svix](https://resend.com/docs/webhooks/verify-webhooks-requests): `svix-id`, `svix-timestamp` and `svix-signature` headers and a `whsec_...` signing secret per webhook. Its events carry metadata only ("Webhooks do not include the email body, headers, or attachments", [Resend docs](https://resend.com/docs/webhooks/emails/received)), so a small body cap is enough. For a sender that uses the `webhook-*` headers, leave `headers` at its default.
+
+```yaml
+- name: resend
+  path: /resend/events
+  max_body_bytes: 262144
+  checks:
+    - standard_webhooks:
+        headers: svix
+        secrets:
+          - env: RESEND_WEBHOOK_SECRET
+          - env: RESEND_WEBHOOK_SECRET_NEXT   # rotation: both verify while set
+            optional: true
+  forward:
+    urls: ["http://events-api:8080/resend"]
+    pass_headers: [Content-Type, Svix-Id, Svix-Timestamp]   # never the signature
+```
+
+Each webhook endpoint gets its own secret; never reuse one across sources.
 
 </details>
 
@@ -278,7 +304,7 @@ Configure the Vector `http_server` source with `auth` for the same token and `ac
 hookgate does one job. It does not:
 
 - **Queue or persist.** The sender gets the upstream's answer. Put a durable upstream behind it (an [OpenTelemetry Collector with a persistent queue](examples/otel-collector/), ClickHouse, a broker) or rely on the sender's retries.
-- **Check timestamps or deduplicate.** Schemes that sign a timestamp (Stripe, Slack, Standard Webhooks) are not supported yet.
+- **Check every signed timestamp or deduplicate.** Standard Webhooks timestamps are checked; Stripe's and Slack's timestamp schemes are not supported yet. hookgate keeps no state, so it does not deduplicate.
 - **Verify public-key or JWT signatures** (Discord, SendGrid, SNS) or answer subscription handshakes.
 - **Terminate TLS.** Run it behind your reverse proxy.
 - **Transform payloads.** Bodies are forwarded unchanged.
