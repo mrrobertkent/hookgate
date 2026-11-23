@@ -166,7 +166,7 @@ sources:
   - name: sw
     path: /sw
     checks: [{standard_webhooks: {secrets: [{env: SW_SECRET}]}}]
-    forward: {urls: [`+srv.URL+`]}
+    output: {http: {urls: [`+srv.URL+`]}}
 `)
 	if w := post(g, "/sw", "{}", nil); w.Code != 503 {
 		t.Errorf("got %d, want 503", w.Code)

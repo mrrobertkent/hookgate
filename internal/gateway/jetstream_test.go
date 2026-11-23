@@ -2,11 +2,15 @@ package gateway
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -291,4 +295,67 @@ func TestFailoverLosesNoAcknowledgedEvent(t *testing.T) {
 		}
 	}
 	t.Logf("%d acknowledged (%d after the leader loss), %d answered 503", len(acked), ackedAfterKill, failed)
+}
+
+// The event ID and signing time a Standard Webhooks check authenticates become the message's ID and metadata;
+// the signature header is never published.
+func TestStandardWebhooksEventToJetStream(t *testing.T) {
+	s := testutil.RunServer(t)
+	_, js := testutil.Connect(t, s.ClientURL())
+	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}})
+	key := []byte("0123456789abcdef0123456789abcdef")
+	t.Setenv("SW_SECRET", "whsec_"+base64.StdEncoding.EncodeToString(key))
+	cfg, err := config.Parse([]byte(`
+connections:
+  ev:
+    nats: {urls: ["` + s.ClientURL() + `"], none: true}
+sources:
+  - name: resend
+    path: /e
+    max_body_bytes: 65536
+    checks: [{standard_webhooks: {headers: svix, secrets: [{env: SW_SECRET}]}}]
+    output:
+      jetstream:
+        connection: ev
+        stream: EVENTS
+        pass_headers: [Content-Type, Svix-*]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	closeGateway(t, g)
+	waitReady(t, g)
+
+	body, id, ts := `{"type":"email.sent"}`, "msg_2Kx", time.Now().Unix()
+	mac := hmac.New(sha256.New, key)
+	fmt.Fprintf(mac, "%s.%d.%s", id, ts, body)
+	h := map[string]string{"svix-id": id, "svix-timestamp": strconv.FormatInt(ts, 10),
+		"svix-signature": "v1," + base64.StdEncoding.EncodeToString(mac.Sum(nil)), "Content-Type": "application/json"}
+	for i, want := range []string{`"duplicate":false`, `"duplicate":true`} {
+		if w := post(g, "/e", body, h); w.Code != 200 || !strings.Contains(w.Body.String(), want) {
+			t.Fatalf("delivery %d: %d %s", i, w.Code, w.Body.String())
+		}
+	}
+	st, _ := js.Stream(context.Background(), "EVENTS")
+	m, err := st.GetMsg(context.Background(), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		contract.HeaderMsgID:                "resend:" + id,
+		contract.HeaderEventID:              id,
+		contract.HeaderEventIDAuthenticated: "true",
+		contract.HeaderSignedAt:             time.Unix(ts, 0).UTC().Format(time.RFC3339),
+		"svix-id":                           id,
+		"svix-timestamp":                    strconv.FormatInt(ts, 10),
+	}
+	for k, v := range want {
+		if got := m.Header.Get(k); got != v {
+			t.Errorf("%s = %q, want %q", k, got, v)
+		}
+	}
+	if _, ok := m.Header["svix-signature"]; ok {
+		t.Error("signature header published")
+	}
 }

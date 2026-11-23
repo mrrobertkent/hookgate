@@ -57,7 +57,7 @@ sources:
   - name: s
     path: /s
     checks: [{standard_webhooks: {secrets: [{env: K}]}}]
-    forward: {urls: [http://upstream:8080/in]}
+    output: {http: {urls: [http://upstream:8080/in]}}
 `
 
 func TestStandardWebhooks(t *testing.T) {
