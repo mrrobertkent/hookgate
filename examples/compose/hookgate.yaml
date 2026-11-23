@@ -13,6 +13,7 @@ sources:
           prefix: "sha256="
           secrets:
             - env: GITHUB_WEBHOOK_SECRET
-    forward:
-      urls: ["http://backend:80/"]   # your upstream
-      pass_headers: [Content-Type, X-GitHub-*]
+    output:
+      http:
+        urls: ["http://backend:80/"]   # your upstream
+        pass_headers: [Content-Type, X-GitHub-*]

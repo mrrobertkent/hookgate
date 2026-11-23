@@ -22,21 +22,21 @@ sources:
     hosts: [Hooks.Example.COM., other.example.com]
     path: /events
     `+check+`
-    forward: {urls: [`+srv.URL+`/named]}
+    output: {http: {urls: [`+srv.URL+`/named]}}
   - name: v6
     hosts: ["[::1]", 192.0.2.1]
     path: /events
     `+check+`
-    forward: {urls: [`+srv.URL+`/v6]}
+    output: {http: {urls: [`+srv.URL+`/v6]}}
   - name: fallback
     path: /events
     `+check+`
-    forward: {urls: [`+srv.URL+`/fallback]}
+    output: {http: {urls: [`+srv.URL+`/fallback]}}
   - name: hosted-only
     hosts: [hooks.example.com, id.example.com]
     path: /only
     `+check+`
-    forward: {urls: [`+srv.URL+`/hosted-only]}
+    output: {http: {urls: [`+srv.URL+`/hosted-only]}}
 `)
 	cases := []struct {
 		host, path string
@@ -111,7 +111,7 @@ sources:
   - name: s
     path: /s
     checks: [{token: {header: X-T, secrets: [{env: UNSET_FOR_TEST}]}}]
-    forward: {urls: [http://upstream.invalid]}
+    output: {http: {urls: [http://upstream.invalid]}}
 `)
 	r := httptest.NewRequest(http.MethodGet, "/s", nil)
 	w := httptest.NewRecorder()

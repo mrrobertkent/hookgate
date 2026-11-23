@@ -1,96 +1,45 @@
 package gateway
 
 import (
-	"fmt"
-	"io"
-	"sort"
-	"sync"
 	"sync/atomic"
+
+	"github.com/mrrobertkent/hookgate/internal/metrics"
+	"github.com/mrrobertkent/hookgate/internal/output"
 )
 
-// metrics is a minimal Prometheus text-format registry; hookgate exposes only counters and gauges.
-type metrics struct {
-	mu       sync.Mutex
-	requests map[[2]string]uint64 // {source, outcome}
-	attempts map[[2]string]uint64 // {source, result}
-	ready    map[string]bool
-	inFlight atomic.Int64
-	draining atomic.Bool
+type gatewayMetrics struct {
+	reg       *metrics.Registry
+	requests  *metrics.Counter
+	attempts  *metrics.Counter
+	ready     *metrics.Gauge
+	connected *metrics.Gauge
+	outputs   *output.Metrics
+	inFlight  atomic.Int64
+	draining  atomic.Bool
 }
 
-func newMetrics() *metrics {
-	return &metrics{
-		requests: map[[2]string]uint64{},
-		attempts: map[[2]string]uint64{},
-		ready:    map[string]bool{},
+func newMetrics() *gatewayMetrics {
+	m := &gatewayMetrics{reg: metrics.NewRegistry()}
+	m.requests = m.reg.Counter("hookgate_requests_total", "Webhook requests by source and outcome.", "source", "outcome")
+	m.attempts = m.reg.Counter("hookgate_upstream_attempts_total", "Upstream delivery attempts by source and result.", "source", "result")
+	m.ready = m.reg.Gauge("hookgate_source_ready", "1 when the source's secrets are set and its output's destination checks pass, else 0 (the source answers 503).", "source")
+	m.outputs = &output.Metrics{
+		UpstreamAttempts: m.attempts,
+		PublishAttempts:  m.reg.Counter("hookgate_publish_attempts_total", "JetStream publish attempts by source and result.", "source", "result"),
+		PublishDuration:  m.reg.Histogram("hookgate_publish_duration_seconds", "JetStream publish attempt duration, until the stream's acknowledgement or failure.", metrics.DurationBuckets, "source"),
+		ClaimPuts:        m.reg.Counter("hookgate_claim_check_puts_total", "Claim-check body stores by source and result.", "source", "result"),
 	}
-}
-
-func (m *metrics) request(source, outcome string) {
-	m.mu.Lock()
-	m.requests[[2]string{source, outcome}]++
-	m.mu.Unlock()
-}
-
-func (m *metrics) attempt(source, result string) {
-	m.mu.Lock()
-	m.attempts[[2]string{source, result}]++
-	m.mu.Unlock()
-}
-
-func (m *metrics) setReady(source string, ok bool) {
-	m.mu.Lock()
-	m.ready[source] = ok
-	m.mu.Unlock()
-}
-
-func (m *metrics) write(w io.Writer) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	writePairs(w, "hookgate_requests_total", "Webhook requests by source and outcome.", "outcome", m.requests)
-	writePairs(w, "hookgate_upstream_attempts_total", "Upstream delivery attempts by source and result.", "result", m.attempts)
-
-	fmt.Fprintln(w, "# HELP hookgate_source_ready 1 when every secret of the source is set, else 0 (the source answers 503).")
-	fmt.Fprintln(w, "# TYPE hookgate_source_ready gauge")
-	names := make([]string, 0, len(m.ready))
-	for n := range m.ready {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, n := range names {
-		v := 0
-		if m.ready[n] {
-			v = 1
+	m.connected = m.reg.Gauge("hookgate_nats_connected", "1 while the named NATS connection is connected, else 0.", "connection")
+	m.reg.GaugeFunc("hookgate_in_flight_requests", "Requests being processed.", func() float64 { return float64(m.inFlight.Load()) })
+	m.reg.GaugeFunc("hookgate_draining", "1 after a shutdown signal, while in-flight requests finish.", func() float64 {
+		if m.draining.Load() {
+			return 1
 		}
-		fmt.Fprintf(w, "hookgate_source_ready{source=%q} %d\n", n, v)
-	}
-
-	fmt.Fprintln(w, "# HELP hookgate_in_flight_requests Requests being processed.")
-	fmt.Fprintln(w, "# TYPE hookgate_in_flight_requests gauge")
-	fmt.Fprintf(w, "hookgate_in_flight_requests %d\n", m.inFlight.Load())
-
-	d := 0
-	if m.draining.Load() {
-		d = 1
-	}
-	fmt.Fprintln(w, "# HELP hookgate_draining 1 after a shutdown signal, while in-flight requests finish.")
-	fmt.Fprintln(w, "# TYPE hookgate_draining gauge")
-	fmt.Fprintf(w, "hookgate_draining %d\n", d)
-}
-
-func writePairs(w io.Writer, name, help, label string, series map[[2]string]uint64) {
-	fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s counter\n", name, help, name)
-	keys := make([][2]string, 0, len(series))
-	for k := range series {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i][0] != keys[j][0] {
-			return keys[i][0] < keys[j][0]
-		}
-		return keys[i][1] < keys[j][1]
+		return 0
 	})
-	for _, k := range keys {
-		fmt.Fprintf(w, "%s{source=%q,%s=%q} %d\n", name, k[0], label, k[1], series[k])
-	}
+	return m
 }
+
+func (m *gatewayMetrics) request(source, outcome string) { m.requests.Inc(source, outcome) }
+
+func (m *gatewayMetrics) setReady(source string, ok bool) { m.ready.SetBool(ok, source) }

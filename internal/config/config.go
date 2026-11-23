@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path"
 	"regexp"
@@ -13,20 +12,23 @@ import (
 	"time"
 
 	"go.yaml.in/yaml/v3"
+
+	"github.com/mrrobertkent/hookgate/internal/contract"
 )
 
 // Config is the top-level configuration.
 type Config struct {
-	Listen            string        `yaml:"listen"`
-	AdminListen       string        `yaml:"admin_listen"`
-	MaxConcurrent     int           `yaml:"max_concurrent"`
-	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
-	ReadTimeout       time.Duration `yaml:"read_timeout"`
-	WriteTimeout      time.Duration `yaml:"write_timeout"`
-	IdleTimeout       time.Duration `yaml:"idle_timeout"`
-	DrainDelay        time.Duration `yaml:"drain_delay"`
-	ShutdownTimeout   time.Duration `yaml:"shutdown_timeout"`
-	Sources           []Source      `yaml:"sources"`
+	Listen            string                `yaml:"listen"`
+	AdminListen       string                `yaml:"admin_listen"`
+	MaxConcurrent     int                   `yaml:"max_concurrent"`
+	ReadHeaderTimeout time.Duration         `yaml:"read_header_timeout"`
+	ReadTimeout       time.Duration         `yaml:"read_timeout"`
+	WriteTimeout      time.Duration         `yaml:"write_timeout"`
+	IdleTimeout       time.Duration         `yaml:"idle_timeout"`
+	DrainDelay        time.Duration         `yaml:"drain_delay"`
+	ShutdownTimeout   time.Duration         `yaml:"shutdown_timeout"`
+	Connections       map[string]Connection `yaml:"connections"`
+	Sources           []Source              `yaml:"sources"`
 }
 
 // Source is one webhook sender: where it posts, how it proves itself, and where verified requests go.
@@ -38,7 +40,7 @@ type Source struct {
 	AllowQuery   bool     `yaml:"allow_query"`
 	RejectStatus int      `yaml:"reject_status"`
 	Checks       []Check  `yaml:"checks"`
-	Forward      Forward  `yaml:"forward"`
+	Output       Output   `yaml:"output"`
 }
 
 // Check is one verification step; exactly one of its fields is set. All checks of a source must pass.
@@ -79,17 +81,6 @@ type SecretRef struct {
 	Optional bool   `yaml:"optional"`
 }
 
-// Forward describes the upstream that receives verified requests.
-type Forward struct {
-	URLs           []string             `yaml:"urls"`
-	ResolveAll     bool                 `yaml:"resolve_all"`
-	PassHeaders    []string             `yaml:"pass_headers"`
-	SetHeaders     map[string]SecretRef `yaml:"set_headers"`
-	AttemptTimeout time.Duration        `yaml:"attempt_timeout"`
-	Timeout        time.Duration        `yaml:"timeout"`
-	MaxAttempts    int                  `yaml:"max_attempts"`
-}
-
 // Load reads, defaults and validates a configuration file. Unknown keys are errors.
 func Load(file string) (*Config, error) {
 	raw, err := os.ReadFile(file) //nolint:gosec // G304: the operator chooses the config path.
@@ -118,53 +109,47 @@ func Parse(raw []byte) (*Config, error) {
 }
 
 func (c *Config) applyDefaults() {
-	def := func(d *time.Duration, v time.Duration) {
-		if *d == 0 {
-			*d = v
+	setDefault(&c.Listen, ":8080")
+	setDefault(&c.AdminListen, ":9090")
+	setDefault(&c.MaxConcurrent, 64)
+	setDefault(&c.ReadHeaderTimeout, 5*time.Second)
+	setDefault(&c.ReadTimeout, 15*time.Second)
+	setDefault(&c.WriteTimeout, 60*time.Second)
+	setDefault(&c.IdleTimeout, 120*time.Second)
+	setDefault(&c.ShutdownTimeout, 30*time.Second)
+	for name, conn := range c.Connections {
+		if conn.NATS != nil {
+			conn.NATS.ApplyDefaults(name)
 		}
 	}
-	if c.Listen == "" {
-		c.Listen = ":8080"
-	}
-	if c.AdminListen == "" {
-		c.AdminListen = ":9090"
-	}
-	if c.MaxConcurrent == 0 {
-		c.MaxConcurrent = 64
-	}
-	def(&c.ReadHeaderTimeout, 5*time.Second)
-	def(&c.ReadTimeout, 15*time.Second)
-	def(&c.WriteTimeout, 60*time.Second)
-	def(&c.IdleTimeout, 120*time.Second)
-	def(&c.ShutdownTimeout, 30*time.Second)
 	for i := range c.Sources {
-		s := &c.Sources[i]
-		if s.MaxBodyBytes == 0 {
-			s.MaxBodyBytes = 1 << 20
-		}
-		if s.RejectStatus == 0 {
-			s.RejectStatus = 401
-		}
-		f := &s.Forward
-		def(&f.AttemptTimeout, 5*time.Second)
-		def(&f.Timeout, 20*time.Second)
-		if f.MaxAttempts == 0 {
-			f.MaxAttempts = 3
-		}
-		for j := range s.Checks {
-			s.Checks[j].applyDefaults()
-		}
+		c.Sources[i].applyDefaults()
 	}
 }
 
+// setDefault sets *v to def when *v is the zero value.
+func setDefault[T comparable](v *T, def T) {
+	var zero T
+	if *v == zero {
+		*v = def
+	}
+}
+
+func (s *Source) applyDefaults() {
+	setDefault(&s.MaxBodyBytes, 1<<20)
+	setDefault(&s.RejectStatus, 401)
+	for j := range s.Checks {
+		s.Checks[j].applyDefaults()
+	}
+	s.Output.applyDefaults()
+}
+
 func (ch *Check) applyDefaults() {
-	if ch.HMAC != nil && ch.HMAC.Encoding == "" {
-		ch.HMAC.Encoding = "hex"
+	if ch.HMAC != nil {
+		setDefault(&ch.HMAC.Encoding, "hex")
 	}
 	if sw := ch.StandardWebhooks; sw != nil {
-		if sw.Headers == "" {
-			sw.Headers = "standard"
-		}
+		setDefault(&sw.Headers, "standard")
 		if sw.Tolerance == nil {
 			d := 5 * time.Minute
 			sw.Tolerance = &d
@@ -177,9 +162,11 @@ func (c *Config) validate() error {
 	if c.MaxConcurrent < 1 {
 		errs = append(errs, errors.New("max_concurrent must be >= 1"))
 	}
+	errs = append(errs, c.validateTimeouts()...)
 	if len(c.Sources) == 0 {
 		errs = append(errs, errors.New("at least one source is required"))
 	}
+	errs = append(errs, c.validateConnections()...)
 	names := map[string]bool{}
 	routes := map[route]string{}
 	for i := range c.Sources {
@@ -191,14 +178,34 @@ func (c *Config) validate() error {
 		errs = append(errs, validateName(where, s.Name, names)...)
 		errs = append(errs, s.validateRoutes(where, routes)...)
 		errs = append(errs, s.validate(where)...)
+		errs = append(errs, s.Output.validate(where, s, c)...)
 	}
 	return errors.Join(errs...)
+}
+
+func (c *Config) validateTimeouts() []error {
+	var errs []error
+	for _, d := range []struct {
+		key string
+		v   time.Duration
+	}{
+		{"read_header_timeout", c.ReadHeaderTimeout}, {"read_timeout", c.ReadTimeout}, {"write_timeout", c.WriteTimeout},
+		{"idle_timeout", c.IdleTimeout}, {"shutdown_timeout", c.ShutdownTimeout},
+	} {
+		if d.v <= 0 {
+			errs = append(errs, fmt.Errorf("%s must be > 0", d.key))
+		}
+	}
+	if c.DrainDelay < 0 {
+		errs = append(errs, errors.New("drain_delay must be >= 0"))
+	}
+	return errs
 }
 
 // route is one (host, path) pair a source answers; an empty host stands for the source without hosts.
 type route struct{ host, path string }
 
-var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
+var nameRE = regexp.MustCompile(contract.SourceNamePattern)
 
 func validateName(where, name string, seen map[string]bool) []error {
 	var errs []error
@@ -261,8 +268,58 @@ func (s *Source) validate(where string) []error {
 	if len(s.Checks) == 0 {
 		errs = append(errs, fmt.Errorf("%s: at least one check is required (a source never forwards unverified requests)", where))
 	}
-	errs = append(errs, validateChecks(where, s.Checks)...)
-	return append(errs, s.Forward.validate(where)...)
+	errs = append(errs, s.validateIDHeaders(where)...)
+	return append(errs, validateChecks(where, s.Checks)...)
+}
+
+// eventIDHeaders names the request headers a check authenticates an event ID from.
+func (s *Source) eventIDHeaders() []string {
+	var out []string
+	for _, ch := range s.Checks {
+		if sw := ch.StandardWebhooks; sw != nil {
+			out = append(out, standardWebhooksHeader(sw.Headers, "id"))
+		}
+	}
+	return out
+}
+
+// standardWebhooksHeader names a header of a Standard Webhooks family ("standard" or "svix").
+func standardWebhooksHeader(family, part string) string {
+	if family == "svix" {
+		return "svix-" + part
+	}
+	return "webhook-" + part
+}
+
+// validateIDHeaders rejects a token or HMAC check that reads the header an event ID is authenticated from: the
+// secret would be published as the event ID.
+func (s *Source) validateIDHeaders(where string) []error {
+	var errs []error
+	for _, id := range s.eventIDHeaders() {
+		for _, ch := range s.Checks {
+			if (ch.Token != nil && strings.EqualFold(ch.Token.Header, id)) || (ch.HMAC != nil && strings.EqualFold(ch.HMAC.Header, id)) {
+				errs = append(errs, fmt.Errorf("%s: a token or hmac check reads %s, which carries the event ID", where, id))
+			}
+		}
+	}
+	return errs
+}
+
+// CredentialHeaders names the request headers the source's checks read secrets or signatures from. Outputs
+// never pass them on, whatever pass_headers says.
+func (s *Source) CredentialHeaders() []string {
+	var out []string
+	for _, ch := range s.Checks {
+		switch {
+		case ch.Token != nil:
+			out = append(out, ch.Token.Header)
+		case ch.HMAC != nil:
+			out = append(out, ch.HMAC.Header)
+		case ch.StandardWebhooks != nil:
+			out = append(out, standardWebhooksHeader(ch.StandardWebhooks.Headers, "signature"))
+		}
+	}
+	return out
 }
 
 // validateChecks also allows at most one check that authenticates an event id, so a source has one event id.
@@ -324,29 +381,6 @@ func (h *HMACCheck) validate(where string) []error {
 		errs = append(errs, fmt.Errorf("%s: hmac.encoding must be hex, base64 or base64url", where))
 	}
 	return append(errs, validateSecrets(where+" hmac", h.Secrets)...)
-}
-
-func (f *Forward) validate(where string) []error {
-	var errs []error
-	if len(f.URLs) == 0 {
-		errs = append(errs, fmt.Errorf("%s: forward.urls is required", where))
-	}
-	for _, u := range f.URLs {
-		pu, err := url.Parse(u)
-		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
-			errs = append(errs, fmt.Errorf("%s: forward url %q must be an absolute http(s) URL", where, u))
-		}
-	}
-	for name, ref := range f.SetHeaders {
-		errs = append(errs, validateSecrets(fmt.Sprintf("%s forward.set_headers[%s]", where, name), []SecretRef{ref})...)
-	}
-	if f.AttemptTimeout <= 0 || f.Timeout < f.AttemptTimeout {
-		errs = append(errs, fmt.Errorf("%s: forward timeouts must satisfy 0 < attempt_timeout <= timeout", where))
-	}
-	if f.MaxAttempts < 1 {
-		errs = append(errs, fmt.Errorf("%s: forward.max_attempts must be >= 1", where))
-	}
-	return errs
 }
 
 func (sw *StandardWebhooksCheck) validate(where string) []error {

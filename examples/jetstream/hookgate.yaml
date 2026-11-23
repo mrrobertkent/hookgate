@@ -1,0 +1,27 @@
+listen: ":8080"
+admin_listen: ":9090"
+
+connections:
+  events:
+    nats:
+      urls: ["nats://nats-1:4222", "nats://nats-2:4222", "nats://nats-3:4222"]
+      nkey_seed: {file: keys/hookgate.nk}   # relative to the working directory, /etc/hookgate
+      inbox_prefix: _INBOX.hookgate
+
+sources:
+  # A sender with a shared token and its own event IDs in X-Event-Id (unsigned, so explicitly opted in).
+  - name: demo
+    path: /events
+    max_body_bytes: 1048576
+    checks:
+      - token:
+          header: X-Webhook-Token
+          secrets: [{env: DEMO_WEBHOOK_TOKEN}]
+    output:
+      jetstream:
+        connection: events
+        stream: WEBHOOK_EVENTS
+        pass_headers: [Content-Type]
+        message_id: {header: X-Event-Id, unauthenticated: true}
+        claim_check:
+          object_store: {bucket: WEBHOOK_CLAIMS}

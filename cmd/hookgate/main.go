@@ -1,4 +1,4 @@
-// Command hookgate verifies incoming webhooks and forwards only authentic requests upstream.
+// Command hookgate verifies incoming webhooks and delivers only authentic requests to an HTTP upstream or a NATS JetStream stream.
 package main
 
 import (
@@ -15,13 +15,14 @@ import (
 
 	"github.com/mrrobertkent/hookgate/internal/config"
 	"github.com/mrrobertkent/hookgate/internal/gateway"
+	"github.com/mrrobertkent/hookgate/internal/natsconn"
 	"github.com/mrrobertkent/hookgate/internal/verify"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
 var version = "dev"
 
-const usage = `hookgate verifies incoming webhooks and forwards only authentic requests upstream.
+const usage = `hookgate verifies incoming webhooks and delivers only authentic requests to an HTTP upstream or a NATS JetStream stream.
 
 Usage:
   hookgate [serve] [-config FILE]        run the gateway (default command)
@@ -71,22 +72,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, err)
 			return 1
 		}
-		failed := false
-		for _, s := range cfg.Sources {
-			for _, c := range s.Checks {
-				if _, err := verify.Build(c); err != nil {
-					fmt.Fprintf(stderr, "source %q: %v\n", s.Name, err)
-					failed = true
-				}
-			}
-			for name, ref := range s.Forward.SetHeaders {
-				if v, err := ref.Resolve(); err != nil || v == "" {
-					fmt.Fprintf(stderr, "source %q: set_headers %s: %s is unset or empty\n", s.Name, name, ref)
-					failed = true
-				}
-			}
-		}
-		if failed {
+		if !secretsSet(cfg, stderr) {
 			return 1
 		}
 		fmt.Fprintf(stdout, "ok: %d sources\n", len(cfg.Sources))
@@ -117,4 +103,46 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// secretsSet reports whether every secret the configuration references resolves, printing each that does not.
+func secretsSet(cfg *config.Config, stderr io.Writer) bool {
+	var problems []string
+	for name, c := range cfg.Connections {
+		if c.NATS == nil {
+			continue
+		}
+		if _, err := natsconn.Options(*c.NATS); err != nil {
+			problems = append(problems, fmt.Sprintf("connection %q: %v", name, err))
+		}
+	}
+	for _, s := range cfg.Sources {
+		problems = append(problems, sourceSecretProblems(s)...)
+	}
+	for _, p := range problems {
+		fmt.Fprintln(stderr, p)
+	}
+	return len(problems) == 0
+}
+
+func sourceSecretProblems(s config.Source) []string {
+	var problems []string
+	for _, c := range s.Checks {
+		if _, err := verify.Build(c); err != nil {
+			problems = append(problems, fmt.Sprintf("source %q: %v", s.Name, err))
+		}
+	}
+	for name, ref := range setHeaders(s.Output) {
+		if v, err := ref.Resolve(); err != nil || v == "" {
+			problems = append(problems, fmt.Sprintf("source %q: set_headers %s: %s is unset or empty", s.Name, name, ref))
+		}
+	}
+	return problems
+}
+
+func setHeaders(o config.Output) map[string]config.SecretRef {
+	if o.HTTP != nil {
+		return o.HTTP.SetHeaders
+	}
+	return o.JetStream.SetHeaders
 }

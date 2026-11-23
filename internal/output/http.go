@@ -1,4 +1,4 @@
-package gateway
+package output
 
 import (
 	"bytes"
@@ -10,21 +10,24 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/mrrobertkent/hookgate/internal/config"
+	"github.com/mrrobertkent/hookgate/internal/metrics"
 )
 
 // maxUpstreamResponse bounds the upstream response body relayed to the sender.
 const maxUpstreamResponse = 64 << 10
 
-type forwarder struct {
-	cfg        config.Forward
+// httpOutput forwards verified bytes to HTTP upstreams.
+type httpOutput struct {
+	source     string
+	cfg        config.HTTPOutput
 	setHeaders http.Header
-	pass       []string // canonical names; a trailing * matches a prefix
+	pass       headerFilter
 	client     *http.Client
 	resolver   *net.Resolver
+	attempts   *metrics.Counter
 }
 
 type upstreamResult struct {
@@ -33,11 +36,15 @@ type upstreamResult struct {
 	body   []byte
 }
 
-func newForwarder(cfg config.Forward) (*forwarder, error) {
-	f := &forwarder{
+func newHTTP(src config.Source, d Deps) (*httpOutput, error) {
+	cfg := *src.Output.HTTP
+	f := &httpOutput{
+		source:     src.Name,
 		cfg:        cfg,
 		setHeaders: http.Header{},
+		pass:       newHeaderFilter(cfg.PassHeaders, src.CredentialHeaders()),
 		resolver:   net.DefaultResolver,
+		attempts:   d.Metrics.UpstreamAttempts,
 		client: &http.Client{
 			// One connection per attempt: a pooled connection the upstream already closed would fail the
 			// attempt, and an attempt is cheap at webhook rates.
@@ -52,42 +59,39 @@ func newForwarder(cfg config.Forward) (*forwarder, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}
-	for name, ref := range cfg.SetHeaders {
-		v, err := ref.Resolve()
-		if err != nil {
-			return nil, fmt.Errorf("set_headers %s: %w", name, err)
-		}
-		if v == "" {
-			return nil, fmt.Errorf("set_headers %s: %s is empty", name, ref)
-		}
-		f.setHeaders.Set(name, v)
+	set, err := resolveSetHeaders(cfg.SetHeaders)
+	if err != nil {
+		return nil, err
 	}
-	for _, p := range cfg.PassHeaders {
-		if strings.HasSuffix(p, "*") {
-			f.pass = append(f.pass, http.CanonicalHeaderKey(strings.TrimSuffix(p, "*"))+"*")
-		} else {
-			f.pass = append(f.pass, http.CanonicalHeaderKey(p))
-		}
+	for name, v := range set {
+		f.setHeaders.Set(name, v)
 	}
 	return f, nil
 }
 
-func (f *forwarder) passes(name string) bool {
-	for _, p := range f.pass {
-		if prefix, ok := strings.CutSuffix(p, "*"); ok {
-			if strings.HasPrefix(name, prefix) {
-				return true
-			}
-		} else if name == p {
-			return true
-		}
+// Ready is always nil: an upstream's health shows per request.
+func (f *httpOutput) Ready() error { return nil }
+
+// Deliver forwards ev. The sender gets the upstream's final status, Content-Type and body (bounded), or 502
+// when no upstream answered.
+func (f *httpOutput) Deliver(ctx context.Context, ev Event) Result {
+	res, err := f.deliver(ctx, ev)
+	if err != nil {
+		return Result{Status: http.StatusBadGateway, Outcome: "upstream_error", Reason: err.Error()}
 	}
-	return false
+	out := Result{Status: res.status, Outcome: "forwarded", Body: res.body}
+	if res.status >= 400 {
+		out.Outcome = "upstream_error"
+	}
+	if ct := res.header.Get(contentType); ct != "" {
+		out.Header = http.Header{contentType: {ct}}
+	}
+	return out
 }
 
 // targets expands the configured URLs into attempt targets. With resolve_all, each host name is resolved to
 // every address it has (for example every task behind a service name), in random order.
-func (f *forwarder) targets(ctx context.Context) []*url.URL {
+func (f *httpOutput) targets(ctx context.Context) []*url.URL {
 	var out []*url.URL
 	for _, raw := range f.cfg.URLs {
 		u, _ := url.Parse(raw) // validated at load
@@ -117,7 +121,7 @@ func (f *forwarder) targets(ctx context.Context) []*url.URL {
 
 // deliver sends the verified bytes upstream. Transport errors and 5xx responses move on to the next target;
 // any other response is final. The verified body is the only body ever sent.
-func (f *forwarder) deliver(ctx context.Context, in *http.Request, body []byte, onAttempt func(result string)) (*upstreamResult, error) {
+func (f *httpOutput) deliver(ctx context.Context, ev Event) (*upstreamResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, f.cfg.Timeout)
 	defer cancel()
 
@@ -129,16 +133,16 @@ func (f *forwarder) deliver(ctx context.Context, in *http.Request, body []byte, 
 			break
 		}
 		t := targets[i%len(targets)]
-		res, err := f.attempt(ctx, t, in, body)
+		res, err := f.attempt(ctx, t, ev)
 		switch {
 		case err != nil:
-			onAttempt("error")
+			f.attempts.Inc(f.source, "error")
 			lastErr = err
 		case res.status >= 500:
-			onAttempt("5xx")
+			f.attempts.Inc(f.source, "5xx")
 			last, lastErr = res, nil
 		default:
-			onAttempt(fmt.Sprintf("%dxx", res.status/100))
+			f.attempts.Inc(f.source, fmt.Sprintf("%dxx", res.status/100))
 			return res, nil
 		}
 	}
@@ -146,21 +150,21 @@ func (f *forwarder) deliver(ctx context.Context, in *http.Request, body []byte, 
 		return last, nil
 	}
 	if lastErr == nil {
-		lastErr = errors.New("no attempt made before the forward timeout")
+		lastErr = errors.New("no attempt made before the output timeout")
 	}
 	return nil, lastErr
 }
 
-func (f *forwarder) attempt(ctx context.Context, target *url.URL, in *http.Request, body []byte) (*upstreamResult, error) {
+func (f *httpOutput) attempt(ctx context.Context, target *url.URL, ev Event) (*upstreamResult, error) {
 	ctx, cancel := context.WithTimeout(ctx, f.cfg.AttemptTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, target.String(), bytes.NewReader(ev.Body))
 	if err != nil {
 		return nil, err
 	}
-	for name, vals := range in.Header {
-		if f.passes(name) {
+	for name, vals := range ev.Header {
+		if f.pass.allows(name) {
 			req.Header[name] = append([]string(nil), vals...)
 		}
 	}
@@ -169,6 +173,10 @@ func (f *forwarder) attempt(ctx context.Context, target *url.URL, in *http.Reque
 	}
 	resp, err := f.client.Do(req)
 	if err != nil {
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = config.RedactURL(ue.URL) // the reason is logged; a URL can carry credentials
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()

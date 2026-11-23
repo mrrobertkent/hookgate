@@ -12,15 +12,11 @@ import (
 	"time"
 
 	"github.com/mrrobertkent/hookgate/internal/config"
+	"github.com/mrrobertkent/hookgate/internal/contract"
 )
 
 // minStandardWebhooksKeyBytes is the Standard Webhooks minimum for a decoded symmetric key.
 const minStandardWebhooksKeyBytes = 24
-
-// maxEventIDBytes bounds an event id, which downstream becomes part of message ids and object keys. The id
-// character set excludes '.', the separator of the signed content, so no id and timestamp pair can be
-// re-split into another that signs the same bytes.
-const maxEventIDBytes = 200
 
 // headerFamilies maps the headers option to the names of the id, timestamp and signature headers.
 var headerFamilies = map[string][3]string{
@@ -81,6 +77,9 @@ func standardWebhooksKey(v string) ([]byte, error) {
 func (s *standardWebhooks) Verify(h http.Header, body []byte) (Result, error) {
 	id, err := single(h, s.id)
 	if err != nil {
+		if len(h.Values(s.id)) > 1 {
+			return Result{}, eventIDError{err.Error()}
+		}
 		return Result{}, err
 	}
 	ts, err := single(h, s.timestamp)
@@ -99,8 +98,8 @@ func (s *standardWebhooks) Verify(h http.Header, body []byte) (Result, error) {
 	if !s.matches(m, sigs) {
 		return Result{}, fmt.Errorf("signature in %s does not match", s.signature)
 	}
-	if !validEventID(m.id) {
-		return Result{}, fmt.Errorf("header %s must be 1-%d bytes of A-Z a-z 0-9 _ ~ = + -", s.id, maxEventIDBytes)
+	if !contract.ValidEventID(m.id) {
+		return Result{}, eventIDError{fmt.Sprintf("header %s must be 1-%d bytes of A-Z a-z 0-9 _ ~ = + -", s.id, contract.MaxEventIDBytes)}
 	}
 	return Result{EventID: m.id, SignedAt: signedAt}, nil
 }
@@ -116,20 +115,6 @@ func (s *standardWebhooks) matches(m *message, sigs string) bool {
 		}
 	}
 	return matched
-}
-
-func validEventID(id string) bool {
-	if id == "" || len(id) > maxEventIDBytes {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		c := id[i]
-		alnum := c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
-		if !alnum && !strings.ContainsRune("_~=+-", rune(c)) {
-			return false
-		}
-	}
-	return true
 }
 
 // checkTimestamp returns the time of a canonical decimal Unix timestamp (digits, no sign, no leading zero

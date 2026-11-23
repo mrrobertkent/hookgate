@@ -19,7 +19,7 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
-      - run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - run: go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
       - name: Fuzz the signature verifier
         run: go test -run='^$' -fuzz=FuzzHMAC -fuzztime=60s ./internal/verify
       - name: Fuzz host normalisation
@@ -28,6 +28,10 @@ jobs:
         run: go test -run='^$' -fuzz='^FuzzStandardWebhooks$' -fuzztime=60s ./internal/verify
       - name: Fuzz the Standard Webhooks secret decoder
         run: go test -run='^$' -fuzz=FuzzStandardWebhooksSecret -fuzztime=30s ./internal/verify
+      - name: Fuzz subject templates and event IDs
+        run: |
+          go test -run='^$' -fuzz=FuzzSubjectTemplate -fuzztime=30s ./internal/contract
+          go test -run='^$' -fuzz=FuzzEventID -fuzztime=30s ./internal/contract
       - name: Validate the example configuration
         env:
           E2_WEBHOOK_TOKEN: example-token-value
@@ -56,6 +60,15 @@ jobs:
               --tmpfs /var/lib/otelcol/queue -v "$PWD/$config:/etc/otelcol-contrib/config.yaml:ro" \
               "$collector" validate --config=/etc/otelcol-contrib/config.yaml
           done
+      - name: Validate the JetStream example
+        working-directory: examples/jetstream
+        env:
+          DEMO_WEBHOOK_TOKEN: example-token-value
+        run: |
+          mkdir -p keys
+          go run github.com/nats-io/nkeys/nk -gen user > keys/hookgate.nk
+          go run ../../cmd/hookgate validate -config hookgate.yaml
+          docker compose config --quiet
       - name: Validate the Docker Compose example
         working-directory: examples/compose
         env:
@@ -89,7 +102,8 @@ jobs:
           go-version-file: go.mod
       - name: Test with coverage
         if: env.HAS_SONAR_TOKEN == 'true'
-        run: go test -count=1 -coverprofile=coverage.out ./...
+        # -coverpkg counts code exercised by another package's tests, such as outputs driven through the gateway.
+        run: go test -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
       - uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
         if: env.HAS_SONAR_TOKEN == 'true'
         env:

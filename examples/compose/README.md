@@ -31,7 +31,7 @@ curl -s localhost:9090/metrics | grep hookgate_requests_total
 
 ## Use it
 
-1. Point `forward.urls` in `hookgate.yaml` at your upstream and add a source per sender ([recipes](../../README.md#recipes), [configuration reference](../../docs/configuration.md)).
+1. Point `output.http.urls` in `hookgate.yaml` at your upstream and add a source per sender ([recipes](../../README.md#recipes), [configuration reference](../../docs/configuration.md)).
 2. Put every secret in `.env` and reference it under `environment:` in `compose.yaml`. Keep `.env` out of version control.
 3. Check the file before deploying: `docker compose run --rm hookgate validate`.
 4. Start without the stand-in backend: `docker compose up -d --wait`.

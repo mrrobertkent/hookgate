@@ -35,7 +35,7 @@ sources:
   - name: s
     path: /s
     checks: [{token: {header: X-T, secrets: [{env: HOOKGATE_TEST_TOKEN}]}}]
-    forward: {urls: ["http://upstream/"]}
+    output: {http: {urls: ["http://upstream/"]}}
 `
 	if err := os.WriteFile(file, []byte(cfg), 0o600); err != nil {
 		t.Fatal(err)
@@ -59,5 +59,39 @@ func TestVersionAndUsage(t *testing.T) {
 	}
 	if run([]string{"bogus"}, &stdout, &stderr) != 2 {
 		t.Error("unknown command did not exit 2")
+	}
+}
+
+func TestValidateJetStream(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "hookgate.yaml")
+	cfg := `
+connections:
+  events:
+    nats: {urls: ["nats://nats:4222"], token: {env: HOOKGATE_TEST_NATS_TOKEN}}
+sources:
+  - name: s
+    path: /s
+    max_body_bytes: 1024
+    checks: [{token: {header: X-T, secrets: [{env: HOOKGATE_TEST_TOKEN}]}}]
+    output:
+      jetstream:
+        connection: events
+        stream: EVENTS
+        set_headers: {X-Env: {env: HOOKGATE_TEST_ENV}}
+`
+	if err := os.WriteFile(file, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOOKGATE_TEST_TOKEN", "sixteen-bytes!!!")
+	for _, c := range []struct {
+		natsToken, env string
+		want           int
+	}{{"nats-token", "prod", 0}, {"", "prod", 1}, {"nats-token", "", 1}} {
+		t.Setenv("HOOKGATE_TEST_NATS_TOKEN", c.natsToken)
+		t.Setenv("HOOKGATE_TEST_ENV", c.env)
+		var stdout, stderr bytes.Buffer
+		if got := run([]string{"validate", "-config", file}, &stdout, &stderr); got != c.want {
+			t.Errorf("validate with token %q env %q = %d, want %d (stderr %q)", c.natsToken, c.env, got, c.want, stderr.String())
+		}
 	}
 }

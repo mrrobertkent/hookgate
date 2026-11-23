@@ -12,12 +12,13 @@ sources:
           encoding: hex
           prefix: "sha256="
           secrets: [{env: GITHUB_WEBHOOK_SECRET}]
-    forward:
-      urls: ["http://otel-collector:8088/github"]
-      resolve_all: true
-      pass_headers: [Content-Type, X-GitHub-*]
-      set_headers:
-        Authorization: {env: UPSTREAM_AUTHORIZATION}
+    output:
+      http:
+        urls: ["http://otel-collector:8088/github"]
+        resolve_all: true
+        pass_headers: [Content-Type, X-GitHub-*]
+        set_headers:
+          Authorization: {env: UPSTREAM_AUTHORIZATION}
 
   # Object-storage notifications: a static token plus a base64 HMAC-SHA256 of the body.
   - name: storage
@@ -32,9 +33,10 @@ sources:
           algorithm: sha256
           encoding: base64
           secrets: [{env: STORAGE_SIGNING_SECRET}]
-    forward:
-      urls: ["http://otel-collector:8089/storage/events"]
-      resolve_all: true
-      pass_headers: [Content-Type]
-      set_headers:
-        Authorization: {env: UPSTREAM_AUTHORIZATION}
+    output:
+      http:
+        urls: ["http://otel-collector:8089/storage/events"]
+        resolve_all: true
+        pass_headers: [Content-Type]
+        set_headers:
+          Authorization: {env: UPSTREAM_AUTHORIZATION}

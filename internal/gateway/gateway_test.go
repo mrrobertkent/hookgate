@@ -73,10 +73,11 @@ sources:
     checks:
       - token: {header: X-E2-Token, secrets: [{env: E2_TOKEN}]}
       - hmac: {header: X-Sig, algorithm: sha256, encoding: base64, secrets: [{env: E2_SECRET}]}
-    forward:
-      urls: [`+srv.URL+`/in]
-      pass_headers: [Content-Type, X-Keep-*]
-      set_headers: {Authorization: {env: INTERNAL}}
+    output:
+      http:
+        urls: [`+srv.URL+`/in]
+        pass_headers: [Content-Type, X-Keep-*, X-E2-*, X-Sig]
+        set_headers: {Authorization: {env: INTERNAL}}
 `)
 	body := "[{\"a\":1}]\r\n"
 	good := map[string]string{"X-E2-Token": "e2-token-value-0123", "X-Sig": sign("e2-signing-secret", body),
@@ -138,11 +139,11 @@ sources:
   - name: broken
     path: /broken
     checks: [{token: {header: X-T, secrets: [{env: MISSING_FOR_TEST}]}}]
-    forward: {urls: [`+srv.URL+`]}
+    output: {http: {urls: [`+srv.URL+`]}}
   - name: ok
     path: /ok
     checks: [{token: {header: X-T, secrets: [{env: OK_TOKEN}]}}]
-    forward: {urls: [`+srv.URL+`/ok]}
+    output: {http: {urls: [`+srv.URL+`/ok]}}
 `)
 	if w := post(g, "/broken", "{}", map[string]string{"X-T": ""}); w.Code != 503 {
 		t.Errorf("broken source: got %d, want 503", w.Code)
@@ -165,7 +166,7 @@ sources:
   - name: sw
     path: /sw
     checks: [{standard_webhooks: {secrets: [{env: SW_SECRET}]}}]
-    forward: {urls: [`+srv.URL+`]}
+    output: {http: {urls: [`+srv.URL+`]}}
 `)
 	if w := post(g, "/sw", "{}", nil); w.Code != 503 {
 		t.Errorf("got %d, want 503", w.Code)
@@ -190,7 +191,7 @@ sources:
   - name: s
     path: /s
     checks: [{token: {header: X-T, secrets: [{env: T}]}}]
-    forward: {urls: [`+f.URL+`, `+dead.URL+`, `+ok.URL+`], max_attempts: 3}
+    output: {http: {urls: [`+f.URL+`, `+dead.URL+`, `+ok.URL+`], max_attempts: 3}}
 `)
 	if w := post(g, "/s", "{}", map[string]string{"X-T": "token-value-0123"}); w.Code != 202 {
 		t.Fatalf("got %d, want 202 from the third target", w.Code)
@@ -210,7 +211,7 @@ sources:
   - name: s
     path: /s
     checks: [{token: {header: X-T, secrets: [{env: T}]}}]
-    forward: {urls: [`+srv.URL+`, `+srv.URL+`]}
+    output: {http: {urls: [`+srv.URL+`, `+srv.URL+`]}}
 `)
 	if w := post(g, "/s", "{}", map[string]string{"X-T": "token-value-0123"}); w.Code != 401 {
 		t.Fatalf("got %d", w.Code)
@@ -222,10 +223,10 @@ sources:
 
 func TestConfigRejectsUnknownKeysAndUncheckedSources(t *testing.T) {
 	for _, y := range []string{
-		"sources: [{name: s, path: /s, checks: [{token: {header: X, secrets: [{env: A}]}}], forward: {urls: [http://u]}, typo: 1}]",
-		"sources: [{name: s, path: /s, checks: [], forward: {urls: [http://u]}}]",
-		"sources: [{name: s, path: /s, checks: [{hmac: {header: X, algorithm: md5, secrets: [{env: A}]}}], forward: {urls: [http://u]}}]",
-		"sources: [{name: s, path: /s, checks: [{token: {header: X, secrets: [{env: A}]}}], forward: {urls: [ftp://u]}}]",
+		"sources: [{name: s, path: /s, checks: [{token: {header: X, secrets: [{env: A}]}}], output: {http: {urls: [http://u]}}, typo: 1}]",
+		"sources: [{name: s, path: /s, checks: [], output: {http: {urls: [http://u]}}}]",
+		"sources: [{name: s, path: /s, checks: [{hmac: {header: X, algorithm: md5, secrets: [{env: A}]}}], output: {http: {urls: [http://u]}}}]",
+		"sources: [{name: s, path: /s, checks: [{token: {header: X, secrets: [{env: A}]}}], output: {http: {urls: [ftp://u]}}}]",
 	} {
 		if _, err := config.Parse([]byte(y)); err == nil {
 			t.Errorf("accepted invalid config: %s", y)
