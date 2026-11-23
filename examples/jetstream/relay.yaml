@@ -1,0 +1,19 @@
+admin_listen: ":9091"
+connection:
+  nats:
+    urls: ["nats://nats-1:4222", "nats://nats-2:4222", "nats://nats-3:4222"]
+    nkey_seed: {file: keys/relay.nk}   # relative to the working directory, /etc/hookgate
+stream: WEBHOOK_EVENTS
+consumer: app
+filter_subjects: [webhooks.events.demo, webhooks.replay.app]
+pass_headers: [content-type, x-poison]
+concurrency: 2
+max_attempts: 5
+claim_check:
+  object_store: {bucket: WEBHOOK_CLAIMS}
+dead_letter:
+  stream: WEBHOOK_DEAD
+handler:
+  http:
+    url: http://handler:8080/events
+    timeout: 10s

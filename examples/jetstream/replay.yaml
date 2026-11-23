@@ -1,0 +1,17 @@
+# The operator's replay identity: reads dead letters and republishes them to the failed consumer's replay subject.
+# Only connection, stream, consumer, filter_subjects, claim_check and dead_letter matter to `replay`; the rest
+# must still be valid.
+connection:
+  nats:
+    urls: ["nats://nats-1:4222", "nats://nats-2:4222", "nats://nats-3:4222"]
+    nkey_seed: {file: keys/replay.nk}
+    inbox_prefix: _INBOX.relay-replay
+stream: WEBHOOK_EVENTS
+consumer: app
+filter_subjects: [webhooks.events.demo, webhooks.replay.app]
+claim_check:
+  object_store: {bucket: WEBHOOK_CLAIMS}
+dead_letter:
+  stream: WEBHOOK_DEAD
+handler:
+  http: {url: http://handler:8080/events}

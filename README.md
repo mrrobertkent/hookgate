@@ -8,7 +8,7 @@
 
 hookgate is a lightweight webhook gateway: a single static binary that checks each incoming webhook against its sender's signature or token and delivers only authentic requests, byte for byte, to your OpenTelemetry Collector, ClickHouse, Vector or any HTTP backend, or into a replicated NATS JetStream stream.
 
-[Configuration](docs/configuration.md) · [Event contract](docs/contract.md) · [Releases](https://github.com/mrrobertkent/hookgate/releases) · [Example](examples/hookgate.yaml) · [Security](SECURITY.md)
+[Configuration](docs/configuration.md) · [Event contract](docs/contract.md) · [Relay](docs/relay.md) · [Releases](https://github.com/mrrobertkent/hookgate/releases) · [Example](examples/hookgate.yaml) · [Security](SECURITY.md)
 
 [![CI](https://github.com/mrrobertkent/hookgate/actions/workflows/ci.yml/badge.svg)](https://github.com/mrrobertkent/hookgate/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mrrobertkent/hookgate)](https://github.com/mrrobertkent/hookgate/releases/latest)
@@ -89,6 +89,7 @@ curl -i localhost:8080/github -H "X-Hub-Signature-256: sha256=$SIG" --data-binar
 - **Docker Compose:** [examples/compose](examples/compose/) runs the pinned image with a health check, a restart policy and both ports on loopback behind your reverse proxy.
 - **Binary:** download from [Releases](https://github.com/mrrobertkent/hookgate/releases) and check it with `sha256sum -c checksums.txt`.
 - **Go:** `go install github.com/mrrobertkent/hookgate/cmd/hookgate@latest`
+- **Relay:** `ghcr.io/mrrobertkent/hookgate-relay:<version>` and `hookgate-relay_*` archives; see [docs/relay.md](docs/relay.md).
 
 ### Verify a release
 
@@ -109,6 +110,8 @@ cosign verify ghcr.io/mrrobertkent/hookgate:<version> \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
 gh attestation verify oci://ghcr.io/mrrobertkent/hookgate:<version> --repo mrrobertkent/hookgate
 ```
+
+The relay archives and the `ghcr.io/mrrobertkent/hookgate-relay` image verify the same way.
 
 ## Configuration
 
@@ -317,6 +320,10 @@ sources:
 - The source answers `503` while its connection is down or while the stream or bucket does not fit its limits; it checks again on every reconnect.
 
 A runnable three-node cluster with the gateway: [examples/jetstream](examples/jetstream/).
+
+## Relay
+
+`hookgate-relay` consumes events that hookgate published to NATS JetStream and delivers each to your application, by running a command or posting to an HTTP endpoint, with retries, a dead-letter stream, replay and graceful drain. It ships as its own binary and image, so the gateway image carries no consumer code. See [docs/relay.md](docs/relay.md) and the [event contract](docs/contract.md).
 
 ## Operations
 

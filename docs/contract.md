@@ -1,6 +1,6 @@
 # Event contract
 
-This is what a consumer of hookgate's JetStream output can rely on: subjects, message headers, identifiers, claim checks, delivery guarantees, and what the sender is told. It is versioned; any change to it is a breaking change for consumers and gets a new version.
+This is what a consumer of hookgate's JetStream output can rely on: subjects, message headers, identifiers, claim checks, delivery guarantees, what the sender is told, and how [`hookgate-relay`](relay.md) hands events to application handlers. It is versioned; any change to it is a breaking change for consumers and gets a new version.
 
 ## Version
 
@@ -9,6 +9,8 @@ Every message carries `Hookgate-Contract: 1`. A consumer rejects a message whose
 ## Subjects
 
 Events are published to `webhooks.events.<source>` (the `subject` template, `webhooks.events.{source}` by default). Source names match `[A-Za-z0-9][A-Za-z0-9_-]{0,62}` and so never contain `:`, `/` or `.`.
+
+The relay publishes replays to `webhooks.replay.<consumer>` and dead-letter records to `webhooks.dead.<consumer>` (its `replay_subject` and `dead_letter.subject` defaults), each consumer's to its own subject. Streams carrying these subjects store them as published: no subject transform and no republishing, which could hand one consumer's replay to another. The token `replay` is reserved: every replay subject is `<prefix>.replay.<consumer>`, and no other subject a consumer filters carries `replay` after its first token.
 
 ## Messages
 
@@ -30,6 +32,7 @@ Header names are case-sensitive on NATS and are published exactly as listed:
 | `Hookgate-Claim-Bucket`, `Hookgate-Claim-Key` | Only on claim-checked messages: where the body is stored. |
 | Passed request headers | The request headers the source's `pass_headers` selects, under lowercase names (`content-type`, `webhook-id`, `svix-timestamp`), every value kept. |
 | `set_headers` | The source's static headers, names exactly as configured. |
+| `Hookgate-Replay` | Only on a replay of a dead-letter record: `<dead-letter stream>:<seq>` ([Relay replays](#relay-replays-and-deduplication)). |
 
 Every message carries `Hookgate-Contract`, `Hookgate-Source`, `Hookgate-Body-Sha256` and `Hookgate-Body-Size`; a message without one of them is invalid. The stored message also carries `Nats-Expected-Stream`, which the publish sets; consumers ignore every `Nats-*` header except `Nats-Msg-Id`, and never copy them into a new publish.
 
@@ -89,7 +92,7 @@ An HTTP output answers differently: the upstream's own final status and body, or
 
 - **No ordering.** Requests are handled concurrently and senders retry, so messages can arrive in any order. Order by the payload's own timestamps.
 - **At least once.** A publish whose acknowledgement is lost is retried, and senders retry too, so the same event can be published more than once. Within the stream's `duplicate_window` the broker drops repeats that carry the same `Nats-Msg-Id`.
-- **Deduplicate on (source, event ID).** Consumers keep `(Hookgate-Source, Hookgate-Event-Id)` as a permanent unique key and treat a repeat as already done. A message carrying `Hookgate-Replay` is a deliberate replay of a failed event: process it again, idempotently, instead of skipping it as a repeat.
+- **Deduplicate on (source, event ID).** Consumers keep `(Hookgate-Source, Hookgate-Event-Id)` as a permanent unique key and treat a repeat as already done. A message carrying `Hookgate-Replay` is a deliberate replay of a failed event: process it again, idempotently, instead of skipping it as a repeat. An event without an event ID cannot be deduplicated; treat each delivery of it as possibly repeated.
 
 ## Pairing a stream
 
@@ -97,7 +100,7 @@ hookgate never creates or changes streams or buckets; the deployment does. A str
 
 | Setting | Value | Why |
 |---|---|---|
-| `subjects` | `webhooks.events.>` | One subject per source. |
+| `subjects` | `webhooks.events.>` and, for the relay, `webhooks.replay.>` | One subject per source; replays for each relay consumer. |
 | `retention` | `limits` (required) | With `interest` or `workqueue` retention the stream can acknowledge an event that no consumer was waiting for without storing it. The output's checks require `limits` and acknowledgements (`no_ack: false`). |
 | `storage` | `file` (required for durability) | A memory stream loses everything when its servers restart. hookgate logs a warning. |
 | `num_replicas` | `3` (recommended) | A `200` then means a quorum of servers holds the event, so losing one server loses nothing. With one replica hookgate logs a warning. |
@@ -136,3 +139,85 @@ subscribe:
 ```
 
 Without a claim check only the first two publish permissions and the subscribe permission are needed. Nothing here allows purging or deleting messages, streams or objects, and the gateway never needs to. The `$JS.API.DIRECT.GET` subjects assume a bucket created by a current NATS client or the `nats` CLI, which enables direct get.
+
+## Relay command handlers
+
+[`hookgate-relay`](relay.md) runs `handler.command.path` once per event, directly (no shell), with `handler.command.args`.
+
+**Input.** The full event body on stdin; claim checks are already resolved, so a handler never sees one. The environment holds only `handler.command.env_allow`, `handler.command.set_env` and:
+
+| Variable | Value |
+|---|---|
+| `HOOKGATE_CONTRACT` | Contract version, `1`. |
+| `HOOKGATE_SOURCE` | Source name. |
+| `HOOKGATE_SUBJECT` | Subject the event was consumed from (`webhooks.events.<source>`, or the consumer's replay subject). |
+| `HOOKGATE_MESSAGE_ID` | Stored message ID: `<source>:<event id>`, `replay:<dead-letter stream>:<seq>` for a replay, empty when none. |
+| `HOOKGATE_EVENT_ID` | `Hookgate-Event-Id`; empty when the event has none. |
+| `HOOKGATE_EVENT_ID_AUTHENTICATED` | `true` or `false`; empty when there is no event ID. |
+| `HOOKGATE_ATTEMPT` | Delivery attempt, `1` on first delivery. |
+| `HOOKGATE_STREAM_SEQ` | Sequence of the message in the event stream. |
+| `HOOKGATE_REPLAY` | `Hookgate-Replay` (`<dead-letter stream>:<seq>`) on a replay, else empty. |
+| `HOOKGATE_RECEIVED_AT` | `Hookgate-Received-At`. |
+| `HOOKGATE_HEADERS` | JSON object, header name → array of values: the contract headers present on the message (`Hookgate-Contract`, `-Source`, `-Event-Id`, `-Event-Id-Authenticated`, `-Signed-At`, `-Body-Sha256`, `-Body-Size`, `-Received-At`, `-Replay`) and the application headers matching `pass_headers`, under their published names. |
+
+Every variable is always set, empty when it has no value.
+
+**Exit status.**
+
+| Exit | Meaning | Relay action |
+|---|---|---|
+| `0` | Processed. | Acknowledge. |
+| `75` (`EX_TEMPFAIL`), `69` (`EX_UNAVAILABLE`), `71` (`EX_OSERR`), `74` (`EX_IOERR`) | Transient fault in the handler's environment. | Retry after the backoff delay. |
+| timeout, killed by a signal (for example the OOM killer) | | Retry after the backoff delay. |
+| `126`, `127`, or the program cannot be started (missing, not executable, not a valid executable) | Configuration fault. | Nak the event and pause the relay until restart. |
+| any other | The event cannot be processed. | Dead-letter as `handler_rejected`. |
+
+A retry on the last allowed attempt dead-letters the event as `max_attempts`; a rejection's dead-letter detail is the exit status only (`exit status 3`). A start error that is a transient resource shortage (`EAGAIN`, `ENOMEM`, `ETXTBSY`, `EMFILE`, `ENFILE`) retries; an environment too large for the event (`E2BIG`) dead-letters it as `handler_rejected`.
+
+stdout is discarded. The last 4 KiB of stderr appear in the relay's log line for a failed run, nowhere else; a handler must not write secrets or body data to stderr.
+
+On timeout or shutdown the relay kills the handler's whole process group with SIGKILL, whether or not the handler's output is still open. When the handler exits it kills whatever remains of the group (on Linux before reaping the handler, so the group ID cannot have been reused), so processes a handler starts never outlive it. A handler must therefore tolerate being stopped at any point and running again for the same event.
+
+## Relay HTTP handlers
+
+The relay `POST`s the full body to `handler.http.url` with:
+
+- the contract headers present on the message (as for `HOOKGATE_HEADERS`);
+- the application headers matching `pass_headers`, under their published names;
+- `Hookgate-Attempt`: the delivery attempt, `1` on first delivery;
+- `handler.http.set_headers`, replacing a passed header of the same name in any letter case.
+
+| Response | Relay action |
+|---|---|
+| `2xx` | Acknowledge. |
+| `429`, `5xx`, timeout, connection or transport error, an error reading the response body | Retry after the backoff delay. The detail names the class only (`timeout`, `connection refused`, `connection reset or closed`, `name resolution failed`, `TLS failure`, `network error`, `malformed response`), never the error text, which can quote what the handler sent. |
+| `101`, `3xx` | Configuration fault (upgrades and redirects are never followed; `Location` is not read): nak the event and pause the relay until restart. |
+| any other `4xx` | Dead-letter as `handler_rejected`, detail `status <code>`. |
+
+At most 64 KiB of the response body is read, within `handler.http.timeout`; it is not otherwise used.
+
+## Relay dead-letter records
+
+A record is published to `webhooks.dead.<consumer>` (default) and captured by the dead-letter stream. It is built from an allowlist, never a copy of the stored message:
+
+| Header | Value |
+|---|---|
+| `Hookgate-Contract`, `-Source`, `-Event-Id`, `-Event-Id-Authenticated`, `-Signed-At`, `-Received-At`, `-Body-Sha256`, `-Body-Size` | Copied from the event when present. |
+| application headers | Every non-reserved header of the event, under its published name. |
+| `Hookgate-Dead-Reason` | `handler_rejected`, `max_attempts`, `checksum_mismatch`, `claim_missing` or `invalid_message`. |
+| `Hookgate-Dead-Detail` | Short explanation, at most 256 bytes, never body data or handler output. |
+| `Hookgate-Dead-Attempts` | Delivery attempts made. |
+| `Hookgate-Dead-At` | RFC 3339 UTC, millisecond precision. |
+| `Hookgate-Original-Subject`, `-Original-Stream`, `-Original-Seq`, `-Original-Consumer` | Where the event was consumed. |
+| `Hookgate-Original-Msg-Id` | The event's message ID, when it had one. |
+| `Hookgate-Claim-Bucket`, `Hookgate-Claim-Key` | Only when the record holds no body (below). |
+| `Hookgate-Dead-Headers-Dropped` | `true` when the application headers were left out because, with the metadata, they would exceed the broker's 64 KiB header limit; absent otherwise. A replay of such a record carries only the contract headers. |
+| `Nats-Msg-Id` | `dead:<stream>:<stream created, unix nanoseconds>:<consumer>:<seq>`: one record per stream incarnation, consumer and event within the dead-letter stream's duplicate window, however often the publish is retried. |
+
+The body is the full resolved body, also for claim-checked events, so a replay never depends on the claim bucket. Exceptions: a `checksum_mismatch` or `claim_missing` record of a claim-checked event holds an empty body plus the claim headers, also when an object was fetched but did not match the event's size and SHA-256; an `invalid_message` record holds the message body as stored.
+
+## Relay replays and deduplication
+
+A replay (`hookgate-relay replay`) republishes a dead-letter record to the failed consumer's replay subject (`webhooks.replay.<consumer>` by default; only that consumer filters it) with the record's body, contract headers and application headers, plus `Hookgate-Replay: <dead-letter stream>:<seq>`, and message ID `replay:<dead-letter stream>:<seq>`. It carries no `Hookgate-Dead-*` or `Hookgate-Original-*` headers. A body too large for the event stream travels as a claim check, like a published event.
+
+Handlers deduplicate and treat `Hookgate-Replay` as [Delivery](#delivery) describes; they process a replay even when they have seen the event before, idempotently (update rather than insert twice).

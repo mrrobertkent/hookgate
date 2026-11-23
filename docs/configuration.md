@@ -246,3 +246,7 @@ A disconnect invalidates the last check, and so does any reconnect, counted by t
 ## Logs
 
 One JSON line per request on stderr: `source`, `outcome`, `status`, `reason` (for rejections and failed deliveries), `remote`, `forwarded_for`, `bytes`, `duration_ms`. Secrets, signatures and bodies are never logged.
+
+## Relay
+
+`hookgate-relay` has its own configuration file, documented with the relay: [relay.md](relay.md#configuration).

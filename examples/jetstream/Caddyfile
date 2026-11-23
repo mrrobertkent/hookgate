@@ -1,0 +1,18 @@
+# Stand-in application handler for the relay. It accepts every event except one marked x-poison, which it rejects
+# with 422 unless the event is a replay (standing in for a handler fixed before the replay). Each request is logged.
+{
+	admin off
+}
+
+:8080 {
+	log {
+		output stdout
+		format json
+	}
+	@poison {
+		header X-Poison *
+		not header Hookgate-Replay *
+	}
+	respond @poison "rejected" 422
+	respond "ok" 200
+}

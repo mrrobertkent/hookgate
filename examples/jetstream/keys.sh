@@ -1,12 +1,16 @@
 #!/bin/sh
-# Generates the demo NKeys once and writes the accounts the NATS servers include.
+# Generates the demo NKeys once, each into the volume of the one service that uses it, and writes the accounts the
+# NATS servers include.
 set -eu
-cd /keys
-[ -s hookgate.nk ] || nk -gen user > hookgate.nk
-[ -s admin.nk ] || nk -gen user > admin.nk
-hookgate=$(nk -inkey hookgate.nk -pubout)
-admin=$(nk -inkey admin.nk -pubout)
-cat > auth.conf <<CONF
+for id in admin hookgate relay replay; do
+  [ -s "/keys/$id/$id.nk" ] || nk -gen user > "/keys/$id/$id.nk"
+done
+pub() { nk -inkey "/keys/$1/$1.nk" -pubout; }
+admin=$(pub admin)
+hookgate=$(pub hookgate)
+relay=$(pub relay)
+replay=$(pub replay)
+cat > /keys/nats/auth.conf <<CONF
 accounts {
   WEBHOOKS {
     jetstream: enabled
@@ -26,10 +30,43 @@ accounts {
         ]}
         subscribe: {allow: ["_INBOX.hookgate.>"]}
       }}
+      # The relay of consumer app: its own consumer, its own dead-letter subject, claim-check reads.
+      {nkey: $relay, permissions: {
+        publish: {allow: [
+          "\$JS.API.STREAM.INFO.WEBHOOK_EVENTS",
+          "\$JS.API.CONSUMER.INFO.WEBHOOK_EVENTS.app",
+          "\$JS.API.CONSUMER.MSG.NEXT.WEBHOOK_EVENTS.app",
+          "\$JS.ACK.WEBHOOK_EVENTS.app.>",
+          "\$JS.API.STREAM.INFO.WEBHOOK_DEAD",
+          "webhooks.dead.app",
+          "\$JS.API.STREAM.INFO.OBJ_WEBHOOK_CLAIMS",
+          "\$JS.API.DIRECT.GET.OBJ_WEBHOOK_CLAIMS.\$O.WEBHOOK_CLAIMS.M.>",
+          "\$JS.API.CONSUMER.CREATE.OBJ_WEBHOOK_CLAIMS.*.\$O.WEBHOOK_CLAIMS.C.*",
+          "\$JS.API.CONSUMER.DELETE.OBJ_WEBHOOK_CLAIMS.*",
+          "\$JS.FC.OBJ_WEBHOOK_CLAIMS.>"
+        ]}
+        subscribe: {allow: ["_INBOX.relay-app.>", "\$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.WEBHOOK_EVENTS.app"]}
+      }}
+      # The replay operator: read dead letters, republish to replay subjects, store bodies too large to inline.
+      {nkey: $replay, permissions: {
+        publish: {allow: [
+          "\$JS.API.STREAM.INFO.WEBHOOK_DEAD",
+          "\$JS.API.DIRECT.GET.WEBHOOK_DEAD",
+          "\$JS.API.STREAM.MSG.GET.WEBHOOK_DEAD",
+          "\$JS.API.STREAM.INFO.WEBHOOK_EVENTS",
+          "webhooks.replay.*",
+          "\$JS.API.STREAM.INFO.OBJ_WEBHOOK_CLAIMS",
+          "\$JS.API.DIRECT.GET.OBJ_WEBHOOK_CLAIMS",
+          "\$JS.API.DIRECT.GET.OBJ_WEBHOOK_CLAIMS.\$O.WEBHOOK_CLAIMS.M.>",
+          "\$O.WEBHOOK_CLAIMS.C.>",
+          "\$O.WEBHOOK_CLAIMS.M.>"
+        ]}
+        subscribe: {allow: ["_INBOX.relay-replay.>"]}
+      }}
     ]
   }
 }
 CONF
-# hookgate runs as the distroless nonroot user (65532).
-chown 65532 hookgate.nk
-chmod 0400 hookgate.nk admin.nk
+# hookgate, the relay and replay run as the distroless nonroot user (65532); setup runs as root.
+chown 65532 /keys/hookgate/hookgate.nk /keys/relay/relay.nk /keys/replay/replay.nk
+chmod 0400 /keys/*/*.nk
