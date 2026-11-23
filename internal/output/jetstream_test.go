@@ -438,43 +438,46 @@ func TestOrphanExpiresByTTL(t *testing.T) {
 	}, "orphan did not expire")
 }
 
+type readinessCase struct {
+	name    string
+	payload int32
+	stream  bool
+	bucket  *jetstream.ObjectStoreConfig
+	want    string
+}
+
 func TestNotReadyChecks(t *testing.T) {
-	cases := []struct {
-		name    string
-		payload int32
-		stream  bool
-		bucket  *jetstream.ObjectStoreConfig
-		want    string
-	}{
+	for _, c := range []readinessCase{
 		{"stream missing", 0, false, &jetstream.ObjectStoreConfig{}, "stream EVENTS not found"},
 		{"size inequality", 16 << 10, true, &jetstream.ObjectStoreConfig{}, "exceed"},
 		{"bucket missing", 0, true, nil, "bucket not found"},
 		{"bucket too small", 0, true, &jetstream.ObjectStoreConfig{MaxBytes: 1 << 20}, "max_bytes"},
 		{"bucket TTL short", 0, true, &jetstream.ObjectStoreConfig{TTL: time.Hour}, "TTL"},
 		{"ready", 0, true, &jetstream.ObjectStoreConfig{TTL: 26 * time.Hour}, ""},
+	} {
+		t.Run(c.name, func(t *testing.T) { checkReadiness(t, c) })
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			s := testutil.RunServer(t, func(o *server.Options) {
-				if c.payload > 0 {
-					o.MaxPayload = c.payload
-				}
-			})
-			_, js := testutil.Connect(t, s.ClientURL())
-			if c.stream {
-				eventsStream(t, js)
-			}
-			if c.bucket != nil {
-				c.bucket.Bucket = "CLAIMS"
-				testutil.CreateBucket(t, js, *c.bucket)
-			}
-			o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1048576",
-				"        inline_max_bytes: 10240\n        claim_check: {object_store: {bucket: CLAIMS}}\n"))
-			err := o.Ready()
-			if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
-				t.Errorf("Ready = %v, want %q", err, c.want)
-			}
-		})
+}
+
+func checkReadiness(t *testing.T, c readinessCase) {
+	s := testutil.RunServer(t, func(o *server.Options) {
+		if c.payload > 0 {
+			o.MaxPayload = c.payload
+		}
+	})
+	_, js := testutil.Connect(t, s.ClientURL())
+	if c.stream {
+		eventsStream(t, js)
+	}
+	if c.bucket != nil {
+		c.bucket.Bucket = "CLAIMS"
+		testutil.CreateBucket(t, js, *c.bucket)
+	}
+	o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1048576",
+		"        inline_max_bytes: 10240\n        claim_check: {object_store: {bucket: CLAIMS}}\n"))
+	err := o.Ready()
+	if c.want == "" && err != nil || c.want != "" && (err == nil || !strings.Contains(err.Error(), c.want)) {
+		t.Errorf("Ready = %v, want %q", err, c.want)
 	}
 }
 
@@ -543,29 +546,39 @@ accounts {
 		t.Fatalf("inline: %+v", res)
 	}
 
-	js, _ := jetstream.New(c.Conn)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	assertCannotRemove(t, c.Conn, admin)
+}
+
+// assertCannotRemove checks that nc can neither delete nor purge the claim bucket's stream nor delete one of its
+// messages, and that the bucket still holds its objects.
+func assertCannotRemove(t *testing.T, nc *nats.Conn, admin jetstream.JetStream) {
+	t.Helper()
+	js, err := jetstream.New(nc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := js.DeleteStream(ctx, "OBJ_CLAIMS"); err == nil {
-		t.Error("stream delete allowed")
-	}
-	st, err := admin.Stream(context.Background(), "OBJ_CLAIMS")
+	st, err := js.Stream(ctx, "OBJ_CLAIMS")
 	if err != nil {
 		t.Fatal(err)
 	}
-	hgStream, err := js.Stream(context.Background(), "OBJ_CLAIMS")
+	for name, remove := range map[string]func(context.Context) error{
+		"stream delete":  func(ctx context.Context) error { return js.DeleteStream(ctx, "OBJ_CLAIMS") },
+		"purge":          func(ctx context.Context) error { return st.Purge(ctx) },
+		"message delete": func(ctx context.Context) error { return st.DeleteMsg(ctx, 1) },
+	} {
+		rctx, rcancel := context.WithTimeout(ctx, time.Second)
+		if remove(rctx) == nil {
+			t.Errorf("%s allowed", name)
+		}
+		rcancel()
+	}
+	bucket, err := admin.Stream(ctx, "OBJ_CLAIMS")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pctx, pcancel := context.WithTimeout(context.Background(), time.Second)
-	defer pcancel()
-	if err := hgStream.Purge(pctx); err == nil {
-		t.Error("purge allowed")
-	}
-	if err := hgStream.DeleteMsg(pctx, 1); err == nil {
-		t.Error("message delete allowed")
-	}
-	if info, _ := st.Info(context.Background()); info.State.Msgs == 0 {
-		t.Error("bucket emptied")
+	if info, err := bucket.Info(ctx); err != nil || info.State.Msgs == 0 {
+		t.Errorf("bucket emptied: %v", err)
 	}
 }

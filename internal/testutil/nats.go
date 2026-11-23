@@ -17,13 +17,16 @@ import (
 	"github.com/nats-io/nats.go/jetstream"
 )
 
+// loopback is where every embedded server listens.
+const loopback = "127.0.0.1"
+
 // RunServer starts a single JetStream server on a random loopback port, stopped when the test ends.
 // configure may adjust the options before the server starts.
 func RunServer(t testing.TB, configure ...func(*server.Options)) *server.Server {
 	t.Helper()
 	opts := &server.Options{
 		ServerName: "solo",
-		Host:       "127.0.0.1",
+		Host:       loopback,
 		Port:       -1,
 		JetStream:  true,
 		StoreDir:   t.TempDir(),
@@ -53,7 +56,7 @@ func RunServerFromConfig(t testing.TB, conf string) *server.Server {
 	if opts.Port == 0 {
 		opts.Port = -1
 	}
-	opts.Host, opts.NoLog, opts.NoSigs = "127.0.0.1", true, true
+	opts.Host, opts.NoLog, opts.NoSigs = loopback, true, true
 	return start(t, opts)
 }
 
@@ -74,18 +77,18 @@ func RunCluster(t testing.TB, n int) *Cluster {
 		var routes []*url.URL
 		for j, p := range clusterPorts {
 			if j != i {
-				routes = append(routes, &url.URL{Scheme: "nats", Host: fmt.Sprintf("127.0.0.1:%d", p)})
+				routes = append(routes, &url.URL{Scheme: "nats", Host: fmt.Sprintf("%s:%d", loopback, p)})
 			}
 		}
 		opts := &server.Options{
 			ServerName: fmt.Sprintf("n%d", i+1),
-			Host:       "127.0.0.1",
+			Host:       loopback,
 			Port:       -1,
 			JetStream:  true,
 			StoreDir:   t.TempDir(),
 			NoLog:      true,
 			NoSigs:     true,
-			Cluster:    server.ClusterOpts{Name: "test", Host: "127.0.0.1", Port: clusterPorts[i]},
+			Cluster:    server.ClusterOpts{Name: "test", Host: loopback, Port: clusterPorts[i]},
 			Routes:     routes,
 		}
 		s, err := server.NewServer(opts)

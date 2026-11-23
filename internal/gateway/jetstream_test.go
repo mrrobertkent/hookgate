@@ -215,6 +215,53 @@ func TestShutdownDuringPendingPubAck(t *testing.T) {
 	}
 }
 
+// eventLoad sends events with unique IDs from several workers and records which were acknowledged.
+type eventLoad struct {
+	mu                     sync.Mutex
+	acked                  []string
+	failed, ackedAfterKill int
+	killed                 bool
+}
+
+// start runs workers until the returned function is called; that function waits for them.
+func (l *eventLoad) start(g http.Handler, workers int) func() {
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for w := range workers {
+		wg.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				case <-time.After(2 * time.Millisecond):
+				}
+				id := fmt.Sprintf("w%d-%d", w, i)
+				l.record(id, sendEvent(g, id))
+			}
+		})
+	}
+	return func() { close(stop); wg.Wait() }
+}
+
+func (l *eventLoad) record(id string, code int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if code != http.StatusOK {
+		l.failed++
+		return
+	}
+	l.acked = append(l.acked, id)
+	if l.killed {
+		l.ackedAfterKill++
+	}
+}
+
+func (l *eventLoad) markKilled() {
+	l.mu.Lock()
+	l.killed = true
+	l.mu.Unlock()
+}
+
 // moveLeaderTo makes the named server the stream's leader and returns it.
 func moveLeaderTo(t *testing.T, c *testutil.Cluster, name string) *server.Server {
 	t.Helper()
@@ -243,58 +290,26 @@ func TestFailoverLosesNoAcknowledgedEvent(t *testing.T) {
 	closeGateway(t, g)
 	waitReady(t, g)
 
-	var (
-		mu                     sync.Mutex
-		acked                  []string
-		failed, ackedAfterKill int
-		killed                 bool
-	)
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	for w := range 4 {
-		wg.Go(func() {
-			for i := 0; ; i++ {
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				time.Sleep(2 * time.Millisecond)
-				id := fmt.Sprintf("w%d-%d", w, i)
-				code := sendEvent(g, id)
-				mu.Lock()
-				if code == 200 {
-					acked = append(acked, id)
-					if killed {
-						ackedAfterKill++
-					}
-				} else {
-					failed++
-				}
-				mu.Unlock()
-			}
-		})
-	}
+	load := &eventLoad{}
+	stop := load.start(g, 4)
 	time.Sleep(time.Second)
 	leader := moveLeaderTo(t, c, g.conns["ev"].ConnectedServerName())
-	mu.Lock()
-	killed = true
-	mu.Unlock()
+	load.markKilled()
 	leader.Shutdown()
 	time.Sleep(4 * time.Second)
-	close(stop)
-	wg.Wait()
+	stop()
 
-	if ackedAfterKill == 0 {
+	if load.ackedAfterKill == 0 {
 		t.Fatal("no event acknowledged after the leader was lost")
 	}
 	stored := storedIDs(t, js)
-	for _, id := range acked {
+	for _, id := range load.acked {
 		if stored[id] != 1 {
 			t.Errorf("acknowledged event %s stored %d times", id, stored[id])
 		}
 	}
-	t.Logf("%d acknowledged (%d after the leader loss), %d answered 503", len(acked), ackedAfterKill, failed)
+	acked, ackedAfterKill, failed := len(load.acked), load.ackedAfterKill, load.failed
+	t.Logf("%d acknowledged (%d after the leader loss), %d answered 503", acked, ackedAfterKill, failed)
 }
 
 // The event ID and signing time a Standard Webhooks check authenticates become the message's ID and metadata;

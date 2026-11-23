@@ -280,7 +280,7 @@ func TestJetStreamDefaults(t *testing.T) {
 }
 
 func TestJetStreamValidation(t *testing.T) {
-	repl := func(old, new string) string { return strings.Replace(jetStreamConfig, old, new, 1) }
+	repl := func(from, to string) string { return strings.Replace(jetStreamConfig, from, to, 1) }
 	js := func(extra string) string {
 		return repl("        stream: WEBHOOK_EVENTS\n", "        stream: WEBHOOK_EVENTS\n"+extra)
 	}
