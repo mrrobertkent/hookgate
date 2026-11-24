@@ -6,6 +6,11 @@ on:
 
 permissions: {}
 
+# Each run reads labels from its own event; only the newest event may decide the check.
+concurrency:
+  group: pr-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   type-label:
     runs-on: ubuntu-latest
