@@ -230,6 +230,10 @@ func TestInvalidMessage(t *testing.T) {
 func TestConfigFaultPauses(t *testing.T) {
 	redirect := httptest.NewServer(http.RedirectHandler("http://elsewhere/", http.StatusFound))
 	t.Cleanup(redirect.Close)
+	refused := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	t.Cleanup(refused.Close)
+	forbidden := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusForbidden) }))
+	t.Cleanup(forbidden.Close)
 	cases := map[string]func(t *testing.T) Handler{
 		"exit 127": func(t *testing.T) Handler { return helperHandler(t, "exit", "127") },
 		"exit 126": func(t *testing.T) Handler { return helperHandler(t, "exit", "126") },
@@ -237,6 +241,11 @@ func TestConfigFaultPauses(t *testing.T) {
 			return Handler{Command: &CommandHandler{Path: "/nonexistent/handler", Timeout: time.Second}}
 		},
 		"http 302": func(*testing.T) Handler { return Handler{HTTP: &HTTPHandler{URL: redirect.URL, Timeout: time.Second}} },
+		"exit 78":  func(t *testing.T) Handler { return helperHandler(t, "exit", "78") },
+		"http 401": func(*testing.T) Handler {
+			return Handler{HTTP: &HTTPHandler{URL: refused.URL, Timeout: time.Second}}
+		},
+		"http 403": func(*testing.T) Handler { return Handler{HTTP: &HTTPHandler{URL: forbidden.URL, Timeout: time.Second}} },
 	}
 	for name, h := range cases {
 		t.Run(name, func(t *testing.T) {

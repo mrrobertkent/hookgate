@@ -62,16 +62,18 @@ func (d *httpDeliverer) deliver(ctx context.Context, ev *event) result {
 	if res, fault := configFault(resp.StatusCode); fault {
 		return res
 	}
-	// The response body is read within the request context, so a stalled handler cannot outlast the timeout.
-	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, responseDrain)); err != nil {
-		return d.transportResult(ctx, rctx, fmt.Sprintf("status %d, response body", resp.StatusCode), err)
+	var after time.Duration
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		after = retryAfter(resp.Header, time.Now())
 	}
 	res := statusResult(resp.StatusCode)
-	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
-		if after := retryAfter(resp.Header, time.Now()); after > 0 {
-			res.after = after
-			res.detail += ", Retry-After " + after.String()
-		}
+	// The response body is read within the request context, so a stalled handler cannot outlast the timeout.
+	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, responseDrain)); err != nil {
+		res = d.transportResult(ctx, rctx, fmt.Sprintf("status %d, response body", resp.StatusCode), err)
+	}
+	if after > 0 && res.verdict == verdictRetry {
+		res.after = after
+		res.detail += ", Retry-After " + after.String()
 	}
 	return res
 }

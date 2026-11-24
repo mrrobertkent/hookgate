@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -187,7 +188,7 @@ func TestCommandRejectRetriesUnknownExit(t *testing.T) {
 }
 
 func TestCheckExecSize(t *testing.T) {
-	lim := execLimits{maxString: 1024, total: eventEnvReserve() + execSlack + 4096}
+	lim := execLimits{maxString: 1024, total: eventEnvReserve() + fixedOverhead("/usr/local/bin/handler") + 4096}
 	cases := []struct {
 		name string
 		args []string
@@ -198,7 +199,9 @@ func TestCheckExecSize(t *testing.T) {
 		{"long argument", []string{"ok", strings.Repeat("a", 1024)}, nil, "handler.command.args[1]: 1024 bytes, above the 1023-byte limit"},
 		{"longest argument", []string{strings.Repeat("a", 1023)}, nil, ""},
 		{"long variable", nil, []string{"TOKEN=" + strings.Repeat("s", 1020)}, "environment variable TOKEN: 1026 bytes"},
-		{"total", nil, []string{"A=" + strings.Repeat("x", 1000), "B=" + strings.Repeat("x", 1000), "C=" + strings.Repeat("x", 1000), "D=" + strings.Repeat("x", 1000)}, "exceed the"},
+		{"NUL in an argument", []string{"a\x00b"}, nil, "handler.command.args[0] contains a NUL byte"},
+		{"NUL in a variable", nil, []string{"TOKEN=a\x00b"}, "environment variable TOKEN contains a NUL byte"},
+		{"total", nil, []string{"A=" + strings.Repeat("x", 1000), "B=" + strings.Repeat("x", 1000), "C=" + strings.Repeat("x", 1000), "D=" + strings.Repeat("x", 1000), "E=" + strings.Repeat("x", 1000)}, "exceed the"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,5 +319,78 @@ func TestExecSizeCheckIsSufficient(t *testing.T) {
 	ev.headers["webhook-big"] = []string{strings.Repeat("v", 60<<10)}
 	if res := d.deliver(context.Background(), ev); res.verdict != verdictAck {
 		t.Errorf("%s %q", res.verdict, res.detail)
+	}
+	// Headers beyond the reserve make this one event too large: it is rejected, and the relay is not paused.
+	ev.headers["webhook-big"] = []string{strings.Repeat("v", 120<<10)}
+	if res := d.deliver(context.Background(), ev); res.verdict != verdictReject || !strings.Contains(res.detail, "argument list too long") {
+		t.Errorf("%s %q", res.verdict, res.detail)
+	}
+}
+
+func TestCommandEventWithNUL(t *testing.T) {
+	ev := testEvent()
+	ev.headers.Set("Hookgate-Source", "res\x00end")
+	res := command(t, 10*time.Second, "exit", "0").deliver(context.Background(), ev)
+	if res.verdict != verdictReject || !strings.Contains(res.detail, "NUL") {
+		t.Errorf("%s %q", res.verdict, res.detail)
+	}
+}
+
+func TestHTTPRetryAfterOnBodyError(t *testing.T) {
+	res, _ := httpDeliver(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "30")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte("partial"))
+		w.(http.Flusher).Flush()
+		time.Sleep(2 * time.Second)
+	}, 500*time.Millisecond)
+	if res.verdict != verdictRetry || res.after != 30*time.Second {
+		t.Errorf("%s after %s (%s)", res.verdict, res.after, res.detail)
+	}
+}
+
+func TestCheckRoutingSources(t *testing.T) {
+	rewrite := []jetstream.SubjectTransformConfig{{Source: "webhooks.replay.*", Destination: "webhooks.events.{{wildcard(1)}}"}}
+	same := []jetstream.SubjectTransformConfig{{Source: "webhooks.>", Destination: "webhooks.>"}, {Source: "webhooks.events.>"}}
+	cases := map[string]struct {
+		c    jetstream.StreamConfig
+		fail bool
+	}{
+		"plain source":     {jetstream.StreamConfig{Sources: []*jetstream.StreamSource{{Name: "A"}}}, false},
+		"filtering source": {jetstream.StreamConfig{Sources: []*jetstream.StreamSource{{Name: "A", SubjectTransforms: same}}}, false},
+		"rewriting source": {jetstream.StreamConfig{Sources: []*jetstream.StreamSource{{Name: "A"}, {Name: "B", SubjectTransforms: rewrite}}}, true},
+		"rewriting mirror": {jetstream.StreamConfig{Mirror: &jetstream.StreamSource{Name: "A", SubjectTransforms: rewrite}}, true},
+		"stream transform": {jetstream.StreamConfig{SubjectTransform: &jetstream.SubjectTransformConfig{Source: ">", Destination: "x.>"}}, true},
+		"republishes":      {jetstream.StreamConfig{RePublish: &jetstream.RePublish{Source: ">", Destination: "x.>"}}, true},
+	}
+	for name, tc := range cases {
+		if err := checkRouting("stream S", tc.c); (err != nil) != tc.fail {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestDuplicateWindowOverflow(t *testing.T) {
+	r := &Relay{cfg: &Config{Handler: Handler{HTTP: &HTTPHandler{Timeout: time.Duration(math.MaxInt64 - 10)}}}}
+	if err := r.checkDuplicateWindow(time.Hour, time.Minute); err == nil {
+		t.Error("overflowing timeout accepted")
+	}
+	r.cfg.Handler.HTTP.Timeout = time.Minute
+	if err := r.checkDuplicateWindow(2*time.Minute, time.Minute); err != nil {
+		t.Errorf("exact window: %v", err)
+	}
+	if err := r.checkDuplicateWindow(2*time.Minute-1, time.Minute); err == nil {
+		t.Error("short window accepted")
+	}
+}
+
+func TestStaticEnvWithNUL(t *testing.T) {
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("a\x00b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := CommandHandler{Path: "/usr/local/bin/handler", Timeout: time.Second, SetEnv: map[string]config.SecretRef{"TOKEN": {File: secret}}}
+	if _, err := newCommandDeliverer(h, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "TOKEN contains a NUL byte") {
+		t.Errorf("error %v", err)
 	}
 }

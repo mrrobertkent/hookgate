@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mrrobertkent/hookgate/internal/contract"
@@ -40,7 +41,7 @@ type commandDeliverer struct {
 // newCommandDeliverer resolves set_env secrets once, at start, and checks that they and the arguments fit an execve.
 func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDeliverer, error) {
 	var env []string
-	for _, name := range cfg.EnvAllow {
+	for _, name := range slices.Compact(slices.Sorted(slices.Values(cfg.EnvAllow))) {
 		if v, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+v)
 		}
@@ -69,8 +70,15 @@ func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDelivere
 func (c *commandDeliverer) deliver(ctx context.Context, ev *event) result {
 	runCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
+	evEnv := eventEnv(ev)
+	if slices.ContainsFunc(evEnv, func(kv string) bool { return strings.IndexByte(kv, 0) >= 0 }) {
+		// No environment can carry a NUL byte; the event cannot be handed over.
+		res := result{verdict: verdictReject, detail: "event metadata contains a NUL byte"}
+		c.log.Warn("handler failed", "seq", ev.streamSeq, "attempt", ev.attempt, "result", res.verdict.String(), "detail", res.detail)
+		return res
+	}
 	cmd := exec.Command(c.cfg.Path, c.cfg.Args...) //nolint:gosec // G204: the operator configures the program; event data only reaches its stdin and environment.
-	cmd.Env = append(slices.Clone(c.env), eventEnv(ev)...)
+	cmd.Env = append(slices.Clone(c.env), evEnv...)
 	cmd.Stdin = bytes.NewReader(ev.body)
 	stderr := &tailBuffer{max: stderrTail}
 	cmd.Stderr = stderr

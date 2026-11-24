@@ -130,7 +130,9 @@ func (r *Relay) handlerPlan(work context.Context, m *message, res result, body [
 		return plan{action: actAck}
 	case verdictRetry:
 		p := r.retryPlan(m, res.detail, body, true)
-		p.after = res.after
+		if p.action == actRetry {
+			p.after = res.after
+		}
 		return p
 	case verdictReject:
 		return plan{action: actDeadLetter, reason: contract.DeadHandlerRejected, detail: res.detail, body: body, resolved: true}

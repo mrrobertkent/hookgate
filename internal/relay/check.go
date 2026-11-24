@@ -156,9 +156,9 @@ func (r *Relay) checkDeadStream(c, events jetstream.StreamConfig, ackWait time.D
 // between the record's acknowledgement and terminating the event: the event returns after ack_wait and runs the
 // handler once more before the second publish.
 func (r *Relay) checkDuplicateWindow(window, ackWait time.Duration) error {
-	need := ackWait + r.cfg.handlerTimeout()
-	if window < need {
-		return fmt.Errorf("duplicate_window %s is below the consumer's ack_wait plus the handler timeout (%s)", window, need)
+	timeout := r.cfg.handlerTimeout()
+	if window < ackWait || window-ackWait < timeout {
+		return fmt.Errorf("duplicate_window %s is below the consumer's ack_wait (%s) plus the handler timeout (%s)", window, ackWait, timeout)
 	}
 	return nil
 }
@@ -264,8 +264,9 @@ func describeAge(maxAge, need time.Duration) string {
 	return need.String()
 }
 
-// checkRouting rejects a stream that rewrites or copies subjects: a subject transform could turn one consumer's
-// replay subject into another's, and republishing duplicates events onto other subjects.
+// checkRouting rejects a stream that rewrites or copies subjects: a subject transform, its own or a source's or
+// mirror's, could turn one consumer's replay subject into another's, and republishing duplicates events onto other
+// subjects.
 func checkRouting(where string, c jetstream.StreamConfig) error {
 	var what string
 	switch {
@@ -273,6 +274,8 @@ func checkRouting(where string, c jetstream.StreamConfig) error {
 		what = "has a subject transform"
 	case c.RePublish != nil:
 		what = "republishes messages"
+	case rewritesSource(c.Mirror) || slices.ContainsFunc(c.Sources, rewritesSource):
+		what = "sources or mirrors messages under rewritten subjects"
 	default:
 		return nil
 	}
@@ -280,4 +283,14 @@ func checkRouting(where string, c jetstream.StreamConfig) error {
 		return errors.New(what)
 	}
 	return fmt.Errorf("%s %s; the relay needs subjects stored as published", where, what)
+}
+
+// rewritesSource reports a source or mirror that stores messages under subjects other than their own.
+func rewritesSource(src *jetstream.StreamSource) bool {
+	if src == nil {
+		return false
+	}
+	return slices.ContainsFunc(src.SubjectTransforms, func(t jetstream.SubjectTransformConfig) bool {
+		return t.Destination != "" && t.Destination != t.Source
+	})
 }
