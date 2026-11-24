@@ -3,6 +3,7 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -181,21 +182,32 @@ func Connect(t testing.TB, urls ...string) (*nats.Conn, jetstream.JetStream) {
 // CreateStream creates a stream and fails the test on error.
 func CreateStream(t testing.TB, js jetstream.JetStream, cfg jetstream.StreamConfig) jetstream.Stream {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	s, err := js.CreateStream(ctx, cfg)
+	s, err := retryCreate(func(ctx context.Context) (jetstream.Stream, error) { return js.CreateStream(ctx, cfg) })
 	if err != nil {
 		t.Fatalf("create stream %s: %v", cfg.Name, err)
 	}
 	return s
 }
 
+// retryCreate repeats a create with short attempts: on a freshly formed cluster the first request can be lost
+// while the meta leader settles, and one long attempt would wait for a reply that never comes. Creates are
+// idempotent for an identical configuration.
+func retryCreate[T any](create func(context.Context) (T, error)) (T, error) {
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		v, err := create(ctx)
+		cancel()
+		if err == nil || time.Now().After(deadline) || !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, jetstream.ErrNoStreamResponse) && !errors.Is(err, nats.ErrNoResponders) {
+			return v, err
+		}
+	}
+}
+
 // CreateBucket creates an Object Store bucket and fails the test on error.
 func CreateBucket(t testing.TB, js jetstream.JetStream, cfg jetstream.ObjectStoreConfig) jetstream.ObjectStore {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	o, err := js.CreateObjectStore(ctx, cfg)
+	o, err := retryCreate(func(ctx context.Context) (jetstream.ObjectStore, error) { return js.CreateObjectStore(ctx, cfg) })
 	if err != nil {
 		t.Fatalf("create bucket %s: %v", cfg.Bucket, err)
 	}
