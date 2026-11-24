@@ -2,7 +2,7 @@ name: hookgate-otel
 
 services:
   hookgate:
-    image: ghcr.io/mrrobertkent/hookgate:0.2.0@sha256:319b6f8c0cedb815014829451fab873c8be00e13ea21e68984bcb3caba63702a
+    image: ghcr.io/mrrobertkent/hookgate:0.3.0@sha256:b72bf72d0b425353f1e687f39d1666db4cb3a83d567f2faae9d06f2cadd62e49
     ports: ["8080:8080"]
     environment:
       GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?}
