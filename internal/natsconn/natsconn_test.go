@@ -200,55 +200,45 @@ func TestStatusNext(t *testing.T) {
 	refused := errors.New("dial tcp: connection refused")
 	s := Status{DownSince: t0}
 	s = s.next(false, 0, refused, t0.Add(time.Second))
-	if !s.DownSince.Equal(t0) || s.Rejected {
-		t.Errorf("repeated down sample moved the loss time: %+v", s)
-	}
+	checkStatus(t, s, s.DownSince.Equal(t0) && !s.Rejected, "repeated down sample moved the loss time")
 	s = s.next(true, 1, nil, t0.Add(2*time.Second))
-	if !s.Connected || !s.DownSince.IsZero() || s.Err != nil || s.Reconnects != 1 {
-		t.Errorf("connected: %+v", s)
-	}
+	checkStatus(t, s, s.Connected && s.DownSince.IsZero() && s.Err == nil && s.Reconnects == 1, "connected")
 	t1 := t0.Add(3 * time.Second)
 	s = s.next(false, 1, nats.ErrAuthorization, t1)
-	if !s.Rejected || !s.DownSince.IsZero() {
-		t.Errorf("rejected: %+v", s)
-	}
+	checkStatus(t, s, s.Rejected && s.DownSince.IsZero(), "rejected")
 	// A server reports an expiry, then closes the socket: the outage stays a credential fault.
 	s = s.next(false, 1, nats.ErrAuthExpired, t1)
 	s = s.next(false, 1, io.EOF, t0.Add(4*time.Second))
 	s = s.next(false, 1, refused, t0.Add(5*time.Second))
-	if !s.Rejected || !s.DownSince.IsZero() {
-		t.Errorf("a later generic failure cleared the rejection: %+v", s)
-	}
+	checkStatus(t, s, s.Rejected && s.DownSince.IsZero(), "a later generic failure cleared the rejection")
 	s = s.next(true, 2, nil, t0.Add(6*time.Second))
-	if s.Rejected || !s.Connected {
-		t.Errorf("connected: %+v", s)
-	}
+	checkStatus(t, s, !s.Rejected && s.Connected, "connected")
 	t7 := t0.Add(7 * time.Second)
 	s = s.next(false, 2, io.EOF, t7)
-	if s.Rejected || !s.DownSince.Equal(t7) {
-		t.Errorf("a new outage after a success starts its own clock: %+v", s)
-	}
+	checkStatus(t, s, !s.Rejected && s.DownSince.Equal(t7), "a new outage after a success starts its own clock")
 	// An expiry reported on the live socket, which still reads as connected until it closes.
 	s = s.next(true, 3, nil, t0.Add(8*time.Second))
 	s = s.next(false, 3, nats.ErrAuthExpired, t0.Add(9*time.Second))
 	s = s.next(true, 3, nil, t0.Add(10*time.Second))
 	s = s.next(false, 3, io.EOF, t0.Add(11*time.Second))
-	if !s.Rejected || !s.DownSince.IsZero() {
-		t.Errorf("the rejecting socket cleared its own rejection: %+v", s)
-	}
+	checkStatus(t, s, s.Rejected && s.DownSince.IsZero(), "the rejecting socket cleared its own rejection")
 	// A successful reconnect clears the rejection even when the new connection drops before a sample.
 	s = s.cleared()
 	t12 := t0.Add(12 * time.Second)
 	s = s.next(false, 3, io.EOF, t12)
-	if s.Rejected || !s.DownSince.Equal(t12) {
-		t.Errorf("outage after a successful reconnect: %+v", s)
-	}
+	checkStatus(t, s, !s.Rejected && s.DownSince.Equal(t12), "outage after a successful reconnect")
 	// A reconnect that succeeds and drops before a sample ends the outage: the next one has its own clock.
 	s = s.next(false, 3, io.EOF, t0.Add(13*time.Second)).cleared()
 	t14 := t0.Add(14 * time.Second)
 	s = s.next(false, 4, io.EOF, t14)
-	if !s.DownSince.Equal(t14) {
-		t.Errorf("a new outage after an unsampled reconnect kept the old clock: %+v", s)
+	checkStatus(t, s, s.DownSince.Equal(t14), "a new outage after an unsampled reconnect kept the old clock")
+}
+
+// checkStatus reports s unless ok.
+func checkStatus(t *testing.T, s Status, ok bool, what string) {
+	t.Helper()
+	if !ok {
+		t.Errorf("%s: %+v", what, s)
 	}
 }
 

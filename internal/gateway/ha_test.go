@@ -303,20 +303,26 @@ func TestFleetDeliversEveryEvent(t *testing.T) {
 						t.Errorf("event %s stored %d times", id, stored[id])
 					}
 				}
-				outcome := map[string]string{"http": "forwarded", "jetstream": "published"}[d.name]
-				var total float64
-				for i, in := range fleet {
-					v := in.metric(t, `hookgate_requests_total{source="src",outcome="`+outcome+`"}`)
-					if v == 0 {
-						t.Errorf("instance %d served nothing", i)
-					}
-					total += v
-				}
-				if total != float64(len(ids)) {
-					t.Errorf("instances counted %v requests, want %d", total, len(ids))
-				}
+				checkRequestCounts(t, fleet, d.name, len(ids))
 			})
 		}
+	}
+}
+
+// checkRequestCounts checks that every instance served requests and that their counters add up to want.
+func checkRequestCounts(t *testing.T, fleet []*instance, dest string, want int) {
+	t.Helper()
+	outcome := map[string]string{"http": "forwarded", "jetstream": "published"}[dest]
+	var total float64
+	for i, in := range fleet {
+		v := in.metric(t, `hookgate_requests_total{source="src",outcome="`+outcome+`"}`)
+		if v == 0 {
+			t.Errorf("instance %d served nothing", i)
+		}
+		total += v
+	}
+	if total != float64(want) {
+		t.Errorf("instances counted %v requests, want %d", total, want)
 	}
 }
 
@@ -339,33 +345,47 @@ func TestInstanceLostMidDelivery(t *testing.T) {
 			answer := s.send(t, "victim")
 			wg.Wait()
 
-			var dead []string
-			for _, in := range fleet {
-				if in.dead.Load() {
-					dead = append(dead, in.id)
-				}
-			}
-			if len(dead) != 1 || s.attempts["victim"] != 2 || s.by["victim"] == dead[0] {
-				t.Fatalf("dead instances %v; victim acknowledged by instance %s after %d attempts, want a live one after 2",
-					dead, s.by["victim"], s.attempts["victim"])
-			}
+			checkVictimRetried(t, fleet, s)
 			stored := d.stored(t)
 			for _, id := range ids {
 				if stored[id] < 1 || (d.name == "jetstream" && stored[id] != 1) {
 					t.Errorf("acknowledged event %s stored %d times", id, stored[id])
 				}
 			}
-			switch d.name {
-			case "http":
-				if stored["victim"] != 2 {
-					t.Errorf("upstream received the victim %d times, want 2", stored["victim"])
-				}
-			case "jetstream":
-				if stored["victim"] != 1 || !strings.Contains(answer, `"duplicate":true`) {
-					t.Errorf("stream holds the victim %d times; retry answered %q", stored["victim"], answer)
-				}
-			}
+			checkVictimStored(t, d.name, stored["victim"], answer)
 		})
+	}
+}
+
+// checkVictimRetried checks that exactly one instance died and that the victim was acknowledged by a live one on
+// its second attempt.
+func checkVictimRetried(t *testing.T, fleet []*instance, s *sender) {
+	t.Helper()
+	var dead []string
+	for _, in := range fleet {
+		if in.dead.Load() {
+			dead = append(dead, in.id)
+		}
+	}
+	if len(dead) != 1 || s.attempts["victim"] != 2 || s.by["victim"] == dead[0] {
+		t.Fatalf("dead instances %v; victim acknowledged by instance %s after %d attempts, want a live one after 2",
+			dead, s.by["victim"], s.attempts["victim"])
+	}
+}
+
+// checkVictimStored checks the victim's copies: two at an HTTP upstream, one in a stream with the retry answered
+// as a duplicate.
+func checkVictimStored(t *testing.T, dest string, copies int, answer string) {
+	t.Helper()
+	switch dest {
+	case "http":
+		if copies != 2 {
+			t.Errorf("upstream received the victim %d times, want 2", copies)
+		}
+	case "jetstream":
+		if copies != 1 || !strings.Contains(answer, `"duplicate":true`) {
+			t.Errorf("stream holds the victim %d times; retry answered %q", copies, answer)
+		}
 	}
 }
 
@@ -444,28 +464,12 @@ func TestReadinessRequiresOutputConnections(t *testing.T) {
 
 	// Probe readiness continuously across the whole flap and well past the grace.
 	before := conn.Stats().Reconnects
-	var probes, failures atomic.Int64
-	stop := make(chan struct{})
-	var wg sync.WaitGroup
-	wg.Go(func() {
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-			probes.Add(1)
-			if cut.g.notReady() != "" {
-				failures.Add(1)
-			}
-		}
+	probes, failures := probeReadiness(cut, func() {
+		each((*testutil.Proxy).DropConnections)
+		time.Sleep(2 * grace)
 	})
-	each((*testutil.Proxy).DropConnections)
-	time.Sleep(2 * grace)
-	close(stop)
-	wg.Wait()
-	if n := failures.Load(); n > 0 {
-		t.Fatalf("%d of %d readiness probes failed during a drop shorter than the grace", n, probes.Load())
+	if failures > 0 {
+		t.Fatalf("%d of %d readiness probes failed during a drop shorter than the grace", failures, probes)
 	}
 	if conn.Stats().Reconnects == before || !conn.IsConnected() {
 		t.Fatal("connection did not drop and come back")
@@ -490,6 +494,29 @@ func TestReadinessRequiresOutputConnections(t *testing.T) {
 
 	each(func(p *testutil.Proxy) { p.SetDown(false) })
 	testutil.Eventually(t, 10*time.Second, func() bool { return cut.readyz() == http.StatusOK }, "readyz did not recover")
+}
+
+// probeReadiness probes in's readiness continuously while during runs and counts the probes and the failures.
+func probeReadiness(in *instance, during func()) (probes, failures int64) {
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			probes++
+			if in.g.notReady() != "" {
+				failures++
+			}
+		}
+	})
+	during()
+	close(stop)
+	wg.Wait()
+	return probes, failures
 }
 
 // Credentials the server rejects are a configuration fault every instance shares: with
@@ -553,7 +580,7 @@ sources:
 			t.Fatalf("not ready (%s) after later failures in a rejected outage", reason)
 		}
 	}
-	if v := in.metric(t, rejected); v != 1 {
+	if in.metric(t, rejected) != 1 {
 		t.Errorf("rejection cleared by a later failure in the same outage")
 	}
 }
@@ -565,6 +592,47 @@ func TestReadyzDoesNotWaitForReconnect(t *testing.T) {
 	_, js := testutil.Connect(t, s.ClientURL())
 	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "EVENTS", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	proxy := testutil.StartProxy(t, strings.TrimPrefix(s.ClientURL(), "nats://"))
+	stall := startStallServer(t)
+	t.Setenv("T", tokenValue)
+	block := jetStreamOutputBlock("nats://"+proxy.Addr(), "nats://"+stall.Addr().String())
+	block = strings.Replace(block, "none: true}", "none: true, connect_timeout: 2s}", 1)
+	in := startInstance(t, fleetConfig("readiness: {require_output_connections: true, disconnect_grace: 10s}", block), nil)
+	waitReady(t, in.g)
+	conn := in.g.conns["ev"]
+
+	// Measure how long the client's own status call waits, to show that a reconnect attempt did stall.
+	stalled := measureLongest(t, func() { conn.IsConnected() })
+	proxy.SetDown(true)
+	// A request admitted before the loss was sampled runs its output timeout; measure from the sample.
+	testutil.Eventually(t, 2*time.Second, func() bool { return !conn.Status().Connected }, "loss not sampled")
+	var slowest, slowestRequest time.Duration
+	for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); {
+		start := time.Now()
+		if code := in.readyz(); code != http.StatusOK {
+			t.Fatalf("readyz answered %d within the grace", code)
+		}
+		slowest = max(slowest, time.Since(start))
+		start = time.Now()
+		if code := sendEvent(in.g, "stalled"); code != http.StatusServiceUnavailable {
+			t.Fatalf("request while disconnected answered %d", code)
+		}
+		slowestRequest = max(slowestRequest, time.Since(start))
+	}
+	if s := stalled(); s < time.Second {
+		t.Fatalf("no reconnect attempt stalled (longest status call %v)", s)
+	}
+	if slowest > 500*time.Millisecond {
+		t.Errorf("readyz took %v while a reconnect attempt stalled", slowest)
+	}
+	if slowestRequest > 500*time.Millisecond {
+		t.Errorf("a request took %v to be refused while a reconnect attempt stalled", slowestRequest)
+	}
+}
+
+// startStallServer listens on a local port and accepts connections it never answers, holding them until the test
+// ends.
+func startStallServer(t *testing.T) net.Listener {
+	t.Helper()
 	stall, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -586,16 +654,15 @@ func TestReadyzDoesNotWaitForReconnect(t *testing.T) {
 			conns = append(conns, c)
 		}
 	})
-	t.Setenv("T", tokenValue)
-	block := jetStreamOutputBlock("nats://"+proxy.Addr(), "nats://"+stall.Addr().String())
-	block = strings.Replace(block, "none: true}", "none: true, connect_timeout: 2s}", 1)
-	in := startInstance(t, fleetConfig("readiness: {require_output_connections: true, disconnect_grace: 10s}", block), nil)
-	waitReady(t, in.g)
-	conn := in.g.conns["ev"]
+	return stall
+}
 
-	// Measure how long the client's own status call waits, to show that a reconnect attempt did stall.
-	var stalled atomic.Int64
+// measureLongest calls f continuously until the returned function is called, which returns the longest call, or
+// until the test ends.
+func measureLongest(t *testing.T, f func()) func() time.Duration {
+	var longest time.Duration
 	stop := make(chan struct{})
+	var once sync.Once
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for {
@@ -605,37 +672,15 @@ func TestReadyzDoesNotWaitForReconnect(t *testing.T) {
 			default:
 			}
 			start := time.Now()
-			conn.IsConnected()
-			if d := int64(time.Since(start)); d > stalled.Load() {
-				stalled.Store(d)
-			}
+			f()
+			longest = max(longest, time.Since(start))
 		}
 	})
-	proxy.SetDown(true)
-	// A request admitted before the loss was sampled runs its output timeout; measure from the sample.
-	testutil.Eventually(t, 2*time.Second, func() bool { return !conn.Status().Connected }, "loss not sampled")
-	var slowest, slowestRequest time.Duration
-	for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); {
-		start := time.Now()
-		if code := in.readyz(); code != http.StatusOK {
-			t.Fatalf("readyz answered %d within the grace", code)
-		}
-		slowest = max(slowest, time.Since(start))
-		start = time.Now()
-		if code := sendEvent(in.g, "stalled"); code != http.StatusServiceUnavailable {
-			t.Fatalf("request while disconnected answered %d", code)
-		}
-		slowestRequest = max(slowestRequest, time.Since(start))
+	end := func() time.Duration {
+		once.Do(func() { close(stop) })
+		wg.Wait()
+		return longest
 	}
-	close(stop)
-	wg.Wait()
-	if s := time.Duration(stalled.Load()); s < time.Second {
-		t.Fatalf("no reconnect attempt stalled (longest status call %v)", s)
-	}
-	if slowest > 500*time.Millisecond {
-		t.Errorf("readyz took %v while a reconnect attempt stalled", slowest)
-	}
-	if slowestRequest > 500*time.Millisecond {
-		t.Errorf("a request took %v to be refused while a reconnect attempt stalled", slowestRequest)
-	}
+	t.Cleanup(func() { end() })
+	return end
 }

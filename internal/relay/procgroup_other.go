@@ -4,7 +4,9 @@ package relay
 
 import "os/exec"
 
-func isolate(*exec.Cmd) {}
+func isolate(*exec.Cmd) {
+	// Process groups exist only on Unix; elsewhere the handler runs in the relay's own group.
+}
 
 func killGroup(cmd *exec.Cmd) {
 	if cmd.Process != nil {
