@@ -1,6 +1,6 @@
 name: Feature request
 description: A new signature scheme, upstream, or capability.
-labels: [enhancement]
+labels: [type/feature, status/needs-triage]
 body:
   - type: textarea
     id: problem

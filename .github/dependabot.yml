@@ -3,9 +3,11 @@ updates:
   - package-ecosystem: gomod
     directory: /
     schedule: {interval: weekly}
+    labels: [type/deps]
   - package-ecosystem: github-actions
     directory: /
     schedule: {interval: weekly}
+    labels: [type/deps]
     groups:
       # The CodeQL steps must share one version; analyze fails against a mismatched init.
       codeql-action:
@@ -13,6 +15,8 @@ updates:
   - package-ecosystem: docker
     directory: /
     schedule: {interval: weekly}
+    labels: [type/deps]
   - package-ecosystem: docker-compose
     directories: [/examples/compose, /examples/otel-collector, /examples/jetstream]
     schedule: {interval: weekly}
+    labels: [type/deps, area/examples]

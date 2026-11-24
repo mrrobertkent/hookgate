@@ -1,0 +1,14 @@
+changelog:
+  categories:
+    - title: Breaking changes
+      labels: [breaking-change]
+    - title: Features
+      labels: [type/feature]
+    - title: Fixes
+      labels: [type/fix, type/security]
+    - title: Docs
+      labels: [type/docs]
+    - title: Dependencies
+      labels: [type/deps]
+    - title: Other
+      labels: ["*"]

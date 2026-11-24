@@ -1,0 +1,30 @@
+name: pr-labels
+
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize, reopened]
+
+permissions: {}
+
+# Each run reads labels from its own event; only the newest event may decide the check.
+concurrency:
+  group: pr-labels-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  type-label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require exactly one type/* label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        # Label names are never echoed: a name could carry workflow commands.
+        run: |
+          allowed='["type/feature","type/fix","type/docs","type/ci","type/deps","type/refactor","type/test","type/security"]'
+          types=$(jq '[.[] | select(startswith("type/"))] | length' <<<"$LABELS")
+          known=$(jq --argjson allowed "$allowed" '[.[] | select(IN($allowed[]))] | length' <<<"$LABELS")
+          if [ "$types" -ne 1 ] || [ "$known" -ne 1 ]; then
+            echo "::error::Add exactly one type/* label: type/feature, type/fix, type/docs, type/ci, type/deps, type/refactor, type/test or type/security (found $types type/* labels, $known of them known)."
+            exit 1
+          fi
