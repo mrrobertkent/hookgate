@@ -1,6 +1,6 @@
 name: Bug report
 description: hookgate behaves differently from its documentation.
-labels: [bug]
+labels: [type/fix, status/needs-triage]
 body:
   - type: input
     id: version

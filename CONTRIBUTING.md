@@ -31,10 +31,23 @@ golangci-lint run   # version pinned in .github/workflows/ci.yml
 
 Keep the dependency list short. hookgate depends on the Go standard library, a YAML parser and the official NATS client (`github.com/nats-io/nats.go`, with its `nkeys` and `nuid` packages). The NATS client is maintained by the NATS project and widely used; without it, publishing to JetStream would need a separate bridge service in every deployment. `golang.org/x/sys/unix`, maintained by the Go project, gives the relay `waitid` on Linux, so it can kill a handler's process group before the group ID can be reused. `github.com/nats-io/nats-server/v2` (embedded servers) and `github.com/nats-io/jwt/v2` (creds files) are used only by tests and are never linked into a binary. Tests also use the Standard Webhooks reference library as an oracle. Any other dependency needs the same justification in its pull request. Every verification change needs tests for the valid case, the forged case, the missing-header case and the missing-secret case.
 
+## Labels
+
+| Label | Pull requests | Issues |
+| --- | --- | --- |
+| `type/feature`, `type/fix`, `type/docs`, `type/ci`, `type/deps`, `type/refactor`, `type/test`, `type/security` | Exactly one, required: the `pr-labels` check fails without it, and release notes are grouped by it. | Exactly one before work starts. |
+| `area/gateway`, `area/relay`, `area/verify`, `area/config`, `area/output`, `area/examples`, `area/docs` | Any that apply. | Any that apply. |
+| `breaking-change` | When users must change configuration, handlers or deployment. | For proposals that would need one. |
+| `status/needs-triage`, `status/needs-info` | | `status/needs-triage` until a maintainer confirms the `type/*` label; `status/needs-info` while waiting on the reporter. |
+| `resolution/duplicate`, `resolution/wontfix` | | Why an issue was closed without a change. |
+| `good first issue`, `help wanted` | | Issues open to contributors; GitHub surfaces these names to new contributors. |
+
+The issue forms apply `type/fix` or `type/feature` and `status/needs-triage`. GitHub cannot refuse an issue for its labels, so an issue opened any other way, or without a `type/*` label, is triaged before work starts. Dependabot applies `type/deps` to its pull requests.
+
 ## Pull requests
 
 - One logical change per pull request, with tests.
 - Title it `Area: imperative summary`, for example `Verify: Standard Webhooks signatures`.
 - Fill in the [pull request template](.github/pull_request_template.md). The title is the line in the generated release notes and "What changes for users" is the source for the release summary; a breaking change goes in its `> [!IMPORTANT]` block. Link the issues, docs, upstream sources and files the change relies on, and list the commands you ran with their results.
-- Label it with exactly one `type/*` label: `type/feature`, `type/fix`, `type/docs`, `type/ci`, `type/deps`, `type/refactor`, `type/test` or `type/security`. The `pr-labels` check fails without one, and release notes are grouped by it. Add any `area/*` labels that apply and `breaking-change` when users must change configuration, handlers or deployment. A maintainer labels pull requests from contributors who cannot.
+- Label it as [Labels](#labels) describes. A maintainer labels pull requests from contributors who cannot.
 - By contributing you agree that your contribution is licensed under the Apache License 2.0.
