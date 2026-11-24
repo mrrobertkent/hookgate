@@ -3,6 +3,7 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -44,6 +45,7 @@ type Gateway struct {
 	sem    chan struct{}
 	m      *gatewayMetrics
 	conns  map[string]*natsconn.Conn
+	links  *links
 	stop   context.CancelFunc // ends the output watchers
 }
 
@@ -57,7 +59,14 @@ func New(cfg *config.Config, log *slog.Logger) *Gateway {
 		routes: map[string]*route{},
 		sem:    make(chan struct{}, cfg.MaxConcurrent),
 		m:      newMetrics(),
+		links:  newLinks(),
 	}
+	g.m.reg.GaugeFunc("hookgate_ready", "1 while /readyz answers 200, else 0.", func() float64 {
+		if g.notReady() == "" {
+			return 1
+		}
+		return 0
+	})
 	ctx, stop := context.WithCancel(context.Background())
 	g.stop = stop
 	connErrs, watchers := g.connect()
@@ -66,6 +75,7 @@ func New(cfg *config.Config, log *slog.Logger) *Gateway {
 		if w, ok := s.out.(output.Watcher); ok {
 			conn := sc.Output.JetStream.Connection
 			watchers.add(conn, w)
+			g.links.use(conn)
 			go w.Run(ctx)
 		}
 		g.add(s)
@@ -354,20 +364,25 @@ func (s *source) verify(r *http.Request, body []byte) (verify.Result, *rejection
 	return out, nil
 }
 
-// Admin serves /healthz (process alive), /readyz (503 while draining) and /metrics.
+// Admin serves /healthz (process alive), /readyz (503 while draining, or while an output connection is lost when
+// readiness.require_output_connections is set) and /metrics.
 func (g *Gateway) Admin() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "ok\n") })
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		if g.m.draining.Load() {
-			http.Error(w, "draining", http.StatusServiceUnavailable)
+		if reason := g.notReady(); reason != "" {
+			http.Error(w, reason, http.StatusServiceUnavailable)
 			return
 		}
 		_, _ = io.WriteString(w, "ready\n")
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set(contentType, metrics.ContentType)
-		g.m.reg.Write(w)
+		// Rendered first: the registry holds each family's lock while it writes, and a slow scraper must not
+		// hold up the counters deliveries update.
+		var buf bytes.Buffer
+		g.m.reg.Write(&buf)
+		_, _ = w.Write(buf.Bytes())
 	})
 	return mux
 }

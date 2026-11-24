@@ -136,3 +136,74 @@ func TestCredsOption(t *testing.T) {
 		}
 	}
 }
+
+func newCA(t *testing.T, serial int64, name string) (certPair, *x509.Certificate, *ecdsa.PrivateKey) {
+	now := time.Now()
+	return issue(t, &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: name},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), IsCA: true, BasicConstraintsValid: true,
+		KeyUsage: x509.KeyUsageCertSign}, nil, nil)
+}
+
+func clientCert(t *testing.T, serial int64, ca *x509.Certificate, caKey *ecdsa.PrivateKey) certPair {
+	now := time.Now()
+	p, _, _ := issue(t, &x509.Certificate{SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: "hookgate"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}, ca, caKey)
+	return p
+}
+
+// A server refusing the client certificate, and a server certificate the configured CA does not sign, are
+// credential errors, not an unreachable broker.
+func TestTLSRejectionsAreCredentialErrors(t *testing.T) {
+	now := time.Now()
+	caPEM, ca, caKey := newCA(t, 1, "test ca")
+	otherPEM, other, otherKey := newCA(t, 2, "other ca")
+	srvPEM, _, _ := issue(t, &x509.Certificate{SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "nats"},
+		NotBefore: now.Add(-time.Hour), NotAfter: now.Add(time.Hour), IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}, ca, caKey)
+	srvCert, err := tls.X509KeyPair(srvPEM.cert, srvPEM.key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pool := x509.NewCertPool()
+	pool.AppendCertsFromPEM(caPEM.cert)
+	s := testutil.RunServer(t, func(o *server.Options) {
+		o.TLS, o.TLSVerify = true, true
+		o.TLSConfig = &tls.Config{Certificates: []tls.Certificate{srvCert}, ClientAuth: tls.RequireAndVerifyClientCert,
+			ClientCAs: pool, MinVersion: tls.VersionTLS12}
+	})
+	dir := t.TempDir()
+	good, rogue := clientCert(t, 4, ca, caKey), clientCert(t, 5, other, otherKey)
+	ref := func(name string, b []byte) *config.SecretRef {
+		return &config.SecretRef{File: writeFile(t, dir, name, b)}
+	}
+	cases := map[string]*config.TLS{
+		"client certificate refused": {CA: ref("ca.pem", caPEM.cert), Cert: ref("rogue.pem", rogue.cert), Key: ref("rogue.key", rogue.key)},
+		"server certificate unknown": {CA: ref("other.pem", otherPEM.cert), Cert: ref("good.pem", good.cert), Key: ref("good.key", good.key)},
+	}
+	for name, tc := range cases {
+		cfg := conn([]string{"tls://127.0.0.1:" + itoaPort(s)}, func(c *config.NATSConnection) { c.None = true; c.TLS = tc })
+		failures := make(chan error, 16)
+		c, err := Connect("test", cfg, discard, Callbacks{Sampled: func(_, cur Status) {
+			if cur.Err == nil {
+				return
+			}
+			select {
+			case failures <- cur.Err:
+			default:
+			}
+		}})
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		select {
+		case err := <-failures:
+			if !IsCredentialError(err) {
+				t.Errorf("%s: %v is not a credential error", name, err)
+			}
+			testutil.Eventually(t, 5*time.Second, func() bool { return c.Status().Rejected }, name+": status not rejected")
+		case <-time.After(10 * time.Second):
+			t.Errorf("%s: no failure reported", name)
+		}
+		c.Close()
+	}
+}

@@ -54,48 +54,63 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, version)
 		return 0
 	case "healthcheck":
-		c := &http.Client{Timeout: 3 * time.Second}
-		resp, err := c.Get(*probeURL) //nolint:gosec // G704: the operator sets the probe URL; it defaults to loopback.
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			fmt.Fprintln(stderr, resp.Status)
-			return 1
-		}
-		return 0
+		return healthcheck(*probeURL, stderr)
 	case "validate":
-		cfg, err := config.Load(*cfgPath)
-		if err != nil {
-			fmt.Fprintln(stderr, err)
-			return 1
-		}
-		if !secretsSet(cfg, stderr) {
-			return 1
-		}
-		fmt.Fprintf(stdout, "ok: %d sources\n", len(cfg.Sources))
-		return 0
+		return validate(*cfgPath, stdout, stderr)
 	case "serve":
-		log := slog.New(slog.NewJSONHandler(stderr, nil))
-		cfg, err := config.Load(*cfgPath)
-		if err != nil {
-			log.Error("config", "error", err)
-			return 1
-		}
-		log.Info("starting", "version", version)
-		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-		defer stop()
-		if err := gateway.New(cfg, log).Run(ctx); err != nil {
-			log.Error("server", "error", err)
-			return 1
-		}
-		return 0
+		return serve(*cfgPath, stderr)
 	default:
 		fmt.Fprint(stderr, usage)
 		return 2
 	}
+}
+
+// healthcheck exits 0 when url answers 200.
+func healthcheck(url string, stderr io.Writer) int {
+	c := &http.Client{Timeout: 3 * time.Second}
+	resp, err := c.Get(url) //nolint:gosec // G704: the operator sets the probe URL; it defaults to loopback.
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		fmt.Fprintln(stderr, resp.Status)
+		return 1
+	}
+	return 0
+}
+
+// validate loads the configuration and resolves every secret it references.
+func validate(cfgPath string, stdout, stderr io.Writer) int {
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
+	}
+	if !secretsSet(cfg, stderr) {
+		return 1
+	}
+	fmt.Fprintf(stdout, "ok: %d sources\n", len(cfg.Sources))
+	return 0
+}
+
+// serve runs the gateway until SIGINT or SIGTERM, logging JSON to stderr.
+func serve(cfgPath string, stderr io.Writer) int {
+	log := slog.New(slog.NewJSONHandler(stderr, nil))
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		log.Error("config", "error", err)
+		return 1
+	}
+	log.Info("starting", "version", version)
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	if err := gateway.New(cfg, log).Run(ctx); err != nil {
+		log.Error("server", "error", err)
+		return 1
+	}
+	return 0
 }
 
 func envOr(k, def string) string {

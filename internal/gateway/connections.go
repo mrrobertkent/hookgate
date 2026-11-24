@@ -30,10 +30,7 @@ func (w *watchers) list(conn string) []output.Watcher {
 	return append([]output.Watcher(nil), w.byConn[conn]...)
 }
 
-func (w *watchers) state(conn string, up bool) {
-	if up {
-		return // Connected follows and starts a new check
-	}
+func (w *watchers) disconnected(conn string) {
 	for _, o := range w.list(conn) {
 		o.Disconnected()
 	}
@@ -61,20 +58,33 @@ func (g *Gateway) connect() (map[string]error, *watchers) {
 			continue
 		}
 		g.m.connected.SetBool(false, name)
+		g.m.rejected.SetBool(false, name)
 		c, err := natsconn.Connect("hookgate-"+name, *g.cfg.Connections[name].NATS, g.log, natsconn.Callbacks{
 			Connected: func(*nats.Conn) { ws.reconnected(name) },
-			State: func(up bool) {
-				g.m.connected.SetBool(up, name)
-				ws.state(name, up)
-			},
+			Sampled:   func(prev, cur natsconn.Status) { g.sampled(ws, name, prev, cur) },
 		})
 		if err != nil {
 			errs[name] = err
 			continue
 		}
 		g.conns[name] = c
+		g.links.add(name, c)
 	}
 	return errs, ws
+}
+
+// sampled reports a connection's sampled status: its gauges, a credential rejection, and a loss to the outputs
+// that use it.
+func (g *Gateway) sampled(ws *watchers, name string, prev, cur natsconn.Status) {
+	g.m.connected.SetBool(cur.Connected, name)
+	g.m.rejected.SetBool(cur.Rejected, name)
+	if cur.Rejected && !prev.Rejected {
+		g.log.Error("nats connection's credentials rejected; its sources answer 503 until they are fixed",
+			"connection", name, "error", cur.Err)
+	}
+	if prev.Connected && !cur.Connected {
+		ws.disconnected(name)
+	}
 }
 
 // Close stops the output watchers and drains every connection, waiting until each is closed or ctx ends.

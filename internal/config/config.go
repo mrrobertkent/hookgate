@@ -27,8 +27,17 @@ type Config struct {
 	IdleTimeout       time.Duration         `yaml:"idle_timeout"`
 	DrainDelay        time.Duration         `yaml:"drain_delay"`
 	ShutdownTimeout   time.Duration         `yaml:"shutdown_timeout"`
+	Readiness         Readiness             `yaml:"readiness"`
 	Connections       map[string]Connection `yaml:"connections"`
 	Sources           []Source              `yaml:"sources"`
+}
+
+// Readiness selects what besides draining makes /readyz answer 503.
+type Readiness struct {
+	// RequireOutputConnections makes /readyz fail while a connection a source's output uses has been down
+	// longer than DisconnectGrace.
+	RequireOutputConnections bool           `yaml:"require_output_connections"`
+	DisconnectGrace          *time.Duration `yaml:"disconnect_grace"` // nil until defaulted
 }
 
 // Source is one webhook sender: where it posts, how it proves itself, and where verified requests go.
@@ -117,6 +126,10 @@ func (c *Config) applyDefaults() {
 	setDefault(&c.WriteTimeout, 60*time.Second)
 	setDefault(&c.IdleTimeout, 120*time.Second)
 	setDefault(&c.ShutdownTimeout, 30*time.Second)
+	if c.Readiness.DisconnectGrace == nil {
+		d := 5 * time.Second
+		c.Readiness.DisconnectGrace = &d
+	}
 	for name, conn := range c.Connections {
 		if conn.NATS != nil {
 			conn.NATS.ApplyDefaults(name)
@@ -165,6 +178,9 @@ func (c *Config) validate() error {
 	errs = append(errs, c.validateTimeouts()...)
 	if len(c.Sources) == 0 {
 		errs = append(errs, errors.New("at least one source is required"))
+	}
+	if g := c.Readiness.DisconnectGrace; g == nil || *g < 0 {
+		errs = append(errs, errors.New("readiness.disconnect_grace must be >= 0"))
 	}
 	errs = append(errs, c.validateConnections()...)
 	names := map[string]bool{}

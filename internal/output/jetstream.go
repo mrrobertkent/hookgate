@@ -112,14 +112,15 @@ func newJetStream(src config.Source, d Deps) (*jetStreamOutput, error) {
 
 // Ready reports ErrNotConnected while the connection is down, and otherwise the result of the last check, which
 // counts only when it ran on the current connection: the client's reconnect count is the same as when it ran.
+// It reads the connection's sampled status, so admitting a request never waits on the client's lock.
 func (o *jetStreamOutput) Ready() error {
-	if !o.nc.IsConnected() {
+	st := o.nc.Status()
+	if !st.Connected {
 		return ErrNotConnected
 	}
-	reconnects := o.nc.Stats().Reconnects
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if !o.checked || o.checkTag != reconnects {
+	if !o.checked || o.checkTag != st.Reconnects {
 		return errNotChecked
 	}
 	return o.checkErr
@@ -207,14 +208,8 @@ func (o *jetStreamOutput) check(ctx context.Context) error {
 		return fmt.Errorf("stream %s: %w", o.cfg.Stream, err)
 	}
 	sc := st.CachedInfo().Config
-	if sc.NoAck {
-		return fmt.Errorf("stream %s has no_ack set; publishes would never be acknowledged", o.cfg.Stream)
-	}
-	if sc.Retention != jetstream.LimitsPolicy {
-		return fmt.Errorf("stream %s retention is %s; it must be limits, or the stream may acknowledge an event without storing it", o.cfg.Stream, sc.Retention)
-	}
-	if sc.Discard != jetstream.DiscardNew {
-		return fmt.Errorf("stream %s discard is %s; it must be new, or a full stream evicts acknowledged events", o.cfg.Stream, sc.Discard)
+	if err := o.streamFault(sc); err != nil {
+		return err
 	}
 	o.warnDurability(sc)
 	o.mu.Lock()
@@ -259,6 +254,53 @@ func (o *jetStreamOutput) checkStore(ctx context.Context, sc jetstream.StreamCon
 		return fmt.Errorf("bucket %s cannot store %d-byte chunks: the limit is %d", b, claimcheck.ChunkSize, chunkLimit)
 	}
 	return nil
+}
+
+// streamFault reports a stream that does not store the source's subject or could acknowledge an event without
+// keeping it.
+func (o *jetStreamOutput) streamFault(sc jetstream.StreamConfig) error {
+	switch {
+	case !bindsSubject(sc, o.subject):
+		return fmt.Errorf("stream %s does not store subject %s", o.cfg.Stream, o.subject)
+	case sc.NoAck:
+		return fmt.Errorf("stream %s has no_ack set; publishes would never be acknowledged", o.cfg.Stream)
+	case sc.Retention != jetstream.LimitsPolicy:
+		return fmt.Errorf("stream %s retention is %s; it must be limits, or the stream may acknowledge an event without storing it", o.cfg.Stream, sc.Retention)
+	case sc.Discard != jetstream.DiscardNew:
+		return fmt.Errorf("stream %s discard is %s; it must be new, or a full stream evicts acknowledged events", o.cfg.Stream, sc.Discard)
+	}
+	return nil
+}
+
+// bindsSubject reports whether the stream's subjects (its name when it lists none) match subject.
+func bindsSubject(sc jetstream.StreamConfig, subject string) bool {
+	filters := sc.Subjects
+	if len(filters) == 0 {
+		filters = []string{sc.Name}
+	}
+	for _, f := range filters {
+		if subjectMatches(f, subject) {
+			return true
+		}
+	}
+	return false
+}
+
+// subjectMatches reports whether a literal subject matches a NATS subject filter: "*" matches one token and a
+// final ">" one or more.
+func subjectMatches(filter, subject string) bool {
+	ft, st := strings.Split(filter, "."), strings.Split(subject, ".")
+	for i, f := range ft {
+		switch {
+		case f == ">" && i == len(ft)-1:
+			return len(st) > i
+		case i >= len(st):
+			return false
+		case f != "*" && f != st[i]:
+			return false
+		}
+	}
+	return len(ft) == len(st)
 }
 
 // warnDurability logs when an acknowledgement from the stream does not mean the event survives a server loss.
@@ -317,9 +359,14 @@ func (o *jetStreamOutput) Deliver(ctx context.Context, ev Event) Result {
 	}
 	ack, err := o.publish(ctx, h, data, msgID, prepare)
 	var big headerSizeError
+	var dest destinationError
 	switch {
 	case errors.As(err, &big):
 		return tooManyHeaderBytes(int64(big))
+	case errors.As(err, &dest):
+		r := unavailable(dest.Error())
+		r.Outcome = "not_ready"
+		return r
 	case errors.Is(err, errClaim):
 		return unavailable(err.Error())
 	case errors.Is(err, nats.ErrMaxPayload):
@@ -452,8 +499,8 @@ func headerBytes(h nats.Header, msgID, stream string) int64 {
 	return int64(m.Size())
 }
 
-// publish retries transient failures within ctx, each attempt bounded by attempt_timeout and preceded by prepare
-// when set; an error from prepare ends it. Every attempt is a fresh message, since a publish adds its option
+// publish retries transient failures within ctx, each attempt bounded by attempt_timeout and preceded by the
+// destination check on the current connection and by prepare when set; an error from either ends it. Every attempt is a fresh message, since a publish adds its option
 // headers to the message it sends.
 func (o *jetStreamOutput) publish(ctx context.Context, h nats.Header, data []byte, msgID string, prepare func(context.Context, nats.Header) error) (*jetstream.PubAck, error) {
 	opts := []jetstream.PublishOpt{jetstream.WithExpectStream(o.cfg.Stream)}
@@ -462,17 +509,7 @@ func (o *jetStreamOutput) publish(ctx context.Context, h nats.Header, data []byt
 	}
 	wait := 50 * time.Millisecond
 	for {
-		if prepare != nil {
-			if err := prepare(ctx, h); err != nil {
-				return nil, err
-			}
-		}
-		actx, cancel := context.WithTimeout(ctx, o.cfg.AttemptTimeout)
-		start := time.Now()
-		ack, err := o.js.PublishMsg(actx, &nats.Msg{Subject: o.subject, Header: cloneHeader(h), Data: data}, opts...)
-		cancel()
-		o.m.PublishDuration.Observe(time.Since(start).Seconds(), o.source)
-		o.m.PublishAttempts.Inc(o.source, attemptResult(ack, err))
+		ack, err := o.attempt(ctx, h, data, opts, prepare)
 		if err == nil || !retryable(err) {
 			return ack, err
 		}
@@ -483,6 +520,72 @@ func (o *jetStreamOutput) publish(ctx context.Context, h nats.Header, data []byt
 		}
 		wait = min(2*wait, time.Second)
 	}
+}
+
+// attempt publishes once over a connection whose destination check passed. The ack counts only when the client
+// kept that connection throughout: a stream of the same name on another server may not store what it
+// acknowledges (an interest-based stream without consumers).
+func (o *jetStreamOutput) attempt(ctx context.Context, h nats.Header, data []byte, opts []jetstream.PublishOpt,
+	prepare func(context.Context, nats.Header) error) (*jetstream.PubAck, error) {
+	tag, err := o.checkCurrent(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if prepare != nil {
+		if err = prepare(ctx, h); err != nil {
+			return nil, err
+		}
+	}
+	actx, cancel := context.WithTimeout(ctx, o.cfg.AttemptTimeout)
+	start := time.Now()
+	ack, err := o.js.PublishMsg(actx, &nats.Msg{Subject: o.subject, Header: cloneHeader(h), Data: data}, opts...)
+	cancel()
+	if err == nil && o.nc.Stats().Reconnects != tag {
+		ack, err = nil, errReconnected
+	}
+	o.m.PublishDuration.Observe(time.Since(start).Seconds(), o.source)
+	o.m.PublishAttempts.Inc(o.source, attemptResult(ack, err))
+	return ack, err
+}
+
+// transient reports a check that failed because the connection is changing, not because of the destination.
+func transient(err error) bool {
+	return err != nil && (retryable(err) || errors.Is(err, nats.ErrConnectionClosed))
+}
+
+// errReconnected reports that the client changed connections during an attempt; the attempt is retried.
+var errReconnected = errors.New("reconnected during the attempt")
+
+// destinationError is a destination check that failed on the current connection.
+type destinationError struct{ err error }
+
+func (e destinationError) Error() string { return "destination check: " + e.err.Error() }
+func (e destinationError) Unwrap() error { return e.err }
+
+// checkCurrent returns the reconnect count of the client's current connection once the destination check has
+// passed on it, running the check now when the last one ran on another connection. A check that cannot finish
+// because the connection is changing is retried.
+func (o *jetStreamOutput) checkCurrent(ctx context.Context) (uint64, error) {
+	tag := o.nc.Stats().Reconnects
+	o.mu.Lock()
+	current, checkErr := o.checked && o.checkTag == tag, o.checkErr
+	o.mu.Unlock()
+	if !current {
+		checkErr = o.check(ctx)
+		if ctx.Err() != nil {
+			return 0, ctx.Err() // the request ended; its check says nothing about the destination
+		}
+		if transient(checkErr) || !o.setCheck(checkErr, tag) {
+			return 0, errReconnected
+		}
+	}
+	if transient(checkErr) {
+		return 0, errReconnected
+	}
+	if checkErr != nil {
+		return 0, destinationError{checkErr}
+	}
+	return tag, nil
 }
 
 func cloneHeader(h nats.Header) nats.Header {
@@ -496,7 +599,7 @@ func cloneHeader(h nats.Header) nats.Header {
 // retryable reports failures that say nothing about the event: timeouts, no stream responding, a connection
 // that is down, and server-side (5xx) JetStream errors.
 func retryable(err error) bool {
-	for _, target := range []error{context.DeadlineExceeded, nats.ErrTimeout, nats.ErrNoResponders, jetstream.ErrNoStreamResponse,
+	for _, target := range []error{errReconnected, context.DeadlineExceeded, nats.ErrTimeout, nats.ErrNoResponders, jetstream.ErrNoStreamResponse,
 		nats.ErrConnectionReconnecting, nats.ErrReconnectBufExceeded, nats.ErrDisconnected} {
 		if errors.Is(err, target) {
 			return true

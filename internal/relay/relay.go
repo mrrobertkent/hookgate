@@ -49,7 +49,7 @@ type Relay struct {
 	claims claimcheck.Store
 
 	mu            sync.Mutex
-	connected     bool
+	connected     bool // the connection's recorded status, which never waits on the client's lock
 	checkErr      error
 	pauseErr      error
 	draining      bool
@@ -147,7 +147,11 @@ func (r *Relay) Run(ctx context.Context) error {
 func (r *Relay) connect() error {
 	nc, err := natsconn.Connect("relay-"+r.cfg.Consumer, r.cfg.Connection.NATS, r.log, natsconn.Callbacks{
 		Connected: func(*nats.Conn) { r.trigger() },
-		State:     r.setConnected,
+		Sampled: func(prev, cur natsconn.Status) {
+			if prev.Connected != cur.Connected {
+				r.setConnected(cur.Connected)
+			}
+		},
 	})
 	if err != nil {
 		return err

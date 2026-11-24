@@ -297,10 +297,10 @@ func TestWrongStreamAnswers503(t *testing.T) {
 	testutil.CreateStream(t, js, jetstream.StreamConfig{Name: "OTHER", Subjects: []string{"webhooks.events.>"}, Discard: jetstream.DiscardNew})
 	eventsStream(t, js, func(c *jetstream.StreamConfig) { c.Subjects = []string{"elsewhere.>"} })
 	o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1024", ""))
-	if err := o.Ready(); err != nil {
-		t.Fatal(err)
+	if err := o.Ready(); err == nil || !strings.Contains(err.Error(), "does not store subject webhooks.events.src") {
+		t.Fatalf("Ready = %v", err)
 	}
-	if res := deliver(o, event("{}", nil)); res.Status != 503 || res.Outcome != "output_error" {
+	if res := deliver(o, event("{}", nil)); res.Status != 503 || res.Outcome != "not_ready" {
 		t.Errorf("%+v", res)
 	}
 	if n := len(streamMsgs(t, js, "OTHER")) + len(streamMsgs(t, js, "EVENTS")); n != 0 {
@@ -426,9 +426,12 @@ func TestOrphanExpiresByTTL(t *testing.T) {
 	testutil.CreateBucket(t, js, jetstream.ObjectStoreConfig{Bucket: "CLAIMS", TTL: 3 * time.Second})
 	src := sourceConfig(t, s.ClientURL(), "none: true", "1048576", strings.Replace(claimed, "{bucket: CLAIMS}}", "{bucket: CLAIMS}, reuse_within: 1s}", 1)+
 		"        attempt_timeout: 200ms\n        timeout: 1s\n")
-	// The bucket TTL is far below what the checks require, so the orphan's expiry is observable; Deliver
-	// itself does not consult readiness.
+	// The bucket TTL is far below what the checks require, so the orphan's expiry is observable; the check is
+	// marked passed on this connection so that Deliver stores the body.
 	o := build(t, s.ClientURL(), src)
+	o.mu.Lock()
+	o.checked, o.checkTag, o.checkErr = true, o.nc.Stats().Reconnects, nil
+	o.mu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := js.DeleteStream(ctx, "EVENTS"); err != nil {
@@ -699,4 +702,89 @@ func TestReadySourceRechecks(t *testing.T) {
 		err := o.Ready()
 		return err != nil && strings.Contains(err.Error(), "discard")
 	}, "still ready after the stream changed")
+}
+
+// A publish on a connection the destination check has not run on checks first: after a reconnect to a server
+// whose stream of the same name would acknowledge and drop the event, the source answers 503 and publishes
+// nothing, even though no reconnect callback ran.
+func TestPublishChecksReplacementServer(t *testing.T) {
+	a, b := testutil.RunServer(t), testutil.RunServer(t)
+	_, jsA := testutil.Connect(t, a.ClientURL())
+	_, jsB := testutil.Connect(t, b.ClientURL())
+	eventsStream(t, jsA)
+	eventsStream(t, jsB, func(c *jetstream.StreamConfig) { c.Retention = jetstream.InterestPolicy })
+	pa := testutil.StartProxy(t, strings.TrimPrefix(a.ClientURL(), "nats://"))
+	pb := testutil.StartProxy(t, strings.TrimPrefix(b.ClientURL(), "nats://"))
+	pb.SetDown(true)
+	urlA, urlB := "nats://"+pa.Addr(), "nats://"+pb.Addr()
+	o := build(t, urlA+","+urlB, sourceConfig(t, `"`+urlA+`", "`+urlB+`"`, "none: true", "1024", ""))
+	if err := o.Ready(); err != nil {
+		t.Fatalf("not ready on the first server: %v", err)
+	}
+
+	before := o.nc.Stats().Reconnects
+	pb.SetDown(false)
+	pa.SetDown(true)
+	testutil.Eventually(t, 10*time.Second, func() bool { return o.nc.Stats().Reconnects > before && o.nc.IsConnected() }, "no reconnect")
+	res := deliver(o, event("{}", nil))
+	if res.Status != http.StatusServiceUnavailable || res.Outcome != "not_ready" || !strings.Contains(res.Reason, "retention") {
+		t.Fatalf("publish after the reconnect: %+v", res)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	st, err := jsB.Stream(ctx, "EVENTS")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := st.Info(ctx); err != nil || info.State.LastSeq != 0 {
+		t.Errorf("the replacement stream received a publish: %+v %v", info, err)
+	}
+}
+
+func TestSubjectMatches(t *testing.T) {
+	for _, c := range []struct {
+		filter, subject string
+		want            bool
+	}{
+		{"webhooks.events.src", "webhooks.events.src", true},
+		{"webhooks.events.*", "webhooks.events.src", true},
+		{"webhooks.*.src", "webhooks.events.src", true},
+		{"webhooks.>", "webhooks.events.src", true},
+		{">", "webhooks", true},
+		{"webhooks.events.>", "webhooks.events", false},
+		{"webhooks.events.*", "webhooks.events.src.x", false},
+		{"webhooks.events", "webhooks.events.src", false},
+		{"webhooks.events.other", "webhooks.events.src", false},
+		{"elsewhere.>", "webhooks.events.src", false},
+		{"webhooks.>.src", "webhooks.events.src", false},
+	} {
+		if got := subjectMatches(c.filter, c.subject); got != c.want {
+			t.Errorf("subjectMatches(%q, %q) = %v, want %v", c.filter, c.subject, got, c.want)
+		}
+	}
+	if !bindsSubject(jetstream.StreamConfig{Name: "webhooks"}, "webhooks") {
+		t.Error("a stream without subjects stores its name")
+	}
+}
+
+// A request that ends while it checks the destination leaves the shared check result alone.
+func TestCancelledCheckIsNotCached(t *testing.T) {
+	s := testutil.RunServer(t)
+	_, js := testutil.Connect(t, s.ClientURL())
+	eventsStream(t, js)
+	o := build(t, s.ClientURL(), sourceConfig(t, s.ClientURL(), "none: true", "1024", ""))
+	o.mu.Lock()
+	o.checkTag++ // the passed check belongs to another connection, so the request checks again
+	tag := o.checkTag
+	o.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := o.checkCurrent(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("checkCurrent = %v", err)
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.checked || o.checkTag != tag || o.checkErr != nil {
+		t.Errorf("a cancelled check replaced the cached result: tag %d err %v", o.checkTag, o.checkErr)
+	}
 }

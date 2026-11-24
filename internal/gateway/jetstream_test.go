@@ -485,3 +485,39 @@ func TestRunBindFailureClosesConnections(t *testing.T) {
 		t.Error("connection left open")
 	}
 }
+
+// A JetStream source whose set_headers secret is missing is not ready on its own; the gateway keeps running and
+// its other sources serve.
+func TestJetStreamSourceWithMissingSecretIsIsolated(t *testing.T) {
+	s := testutil.RunServer(t)
+	up := &captured{}
+	srv := httptest.NewServer(up.handler(http.StatusOK))
+	t.Cleanup(srv.Close)
+	t.Setenv("T", tokenValue)
+	g := newGateway(t, `
+connections:
+  ev:
+    nats: {urls: ["`+s.ClientURL()+`"], none: true}
+sources:
+  - name: ok
+    path: /ok
+    checks: [{token: {header: X-T, secrets: [{env: T}]}}]
+    output: {http: {urls: [`+srv.URL+`]}}
+  - name: events
+    path: /e
+    max_body_bytes: 65536
+    checks: [{token: {header: X-T, secrets: [{env: T}]}}]
+    output:
+      jetstream:
+        connection: ev
+        stream: EVENTS
+        set_headers: {X-Env: {env: MISSING_FOR_TEST}}
+`)
+	closeGateway(t, g)
+	time.Sleep(100 * time.Millisecond) // a watcher started on a broken output would panic by now
+	for path, want := range map[string]int{"/ok": 200, "/e": 503} {
+		if code := post(g, path, "{}", map[string]string{"X-T": tokenValue}).Code; code != want {
+			t.Errorf("%s answered %d, want %d", path, code, want)
+		}
+	}
+}
