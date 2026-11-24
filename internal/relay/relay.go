@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -82,7 +83,7 @@ func New(cfg *Config, log *slog.Logger) (*Relay, error) {
 	}
 	var err error
 	if cfg.Handler.Command != nil {
-		r.handler, err = newCommandDeliverer(*cfg.Handler.Command, log)
+		r.handler, err = newCommandDeliverer(*cfg.Handler.Command, append(slices.Clone(cfg.FilterSubjects), cfg.replaySubject()), log)
 	} else {
 		r.handler, err = newHTTPDeliverer(*cfg.Handler.HTTP)
 	}

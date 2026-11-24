@@ -39,8 +39,9 @@ type commandDeliverer struct {
 	log    *slog.Logger
 }
 
-// newCommandDeliverer resolves set_env secrets once, at start, and checks that they and the arguments fit an execve.
-func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDeliverer, error) {
+// newCommandDeliverer resolves set_env secrets once, at start, and checks that they and the arguments fit an execve
+// with room for events on subjects.
+func newCommandDeliverer(cfg CommandHandler, subjects []string, log *slog.Logger) (*commandDeliverer, error) {
 	var env []string
 	for _, name := range slices.Compact(slices.Sorted(slices.Values(cfg.EnvAllow))) {
 		if v, ok := os.LookupEnv(name); ok {
@@ -63,6 +64,9 @@ func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDelivere
 		}
 	}
 	limits := currentExecLimits()
+	for _, s := range subjects {
+		limits.subject = max(limits.subject, len(s))
+	}
 	if err := checkExecSize(cfg.Path, cfg.Args, env, limits); err != nil {
 		return nil, err
 	}

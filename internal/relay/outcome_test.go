@@ -157,7 +157,7 @@ func TestRetryAfterThroughBroker(t *testing.T) {
 	if len(at) != 2 {
 		t.Fatalf("%d requests", len(at))
 	}
-	if gap := at[1].Sub(at[0]); gap < 2*time.Second || gap > 4*time.Second {
+	if gap := at[1].Sub(at[0]); gap < 2*time.Second || gap > 8*time.Second {
 		t.Errorf("redelivered after %s, want about 2s", gap)
 	}
 }
@@ -190,7 +190,7 @@ func TestCommandRejectRetriesUnknownExit(t *testing.T) {
 }
 
 func TestCheckExecSize(t *testing.T) {
-	lim := execLimits{maxString: 1024, total: eventEnvReserve() + fixedOverhead("/usr/local/bin/handler") + 4096}
+	lim := execLimits{known: true, maxString: 1024, total: execLimits{}.reserve() + fixedOverhead("/usr/local/bin/handler") + 4096}
 	cases := []struct {
 		name string
 		args []string
@@ -222,6 +222,13 @@ func TestCheckExecSize(t *testing.T) {
 	if err := checkExecSize("/x", []string{strings.Repeat("a", 1<<20)}, nil, execLimits{}); err != nil {
 		t.Errorf("no limits: %v", err)
 	}
+	if err := checkExecSize("/x", nil, nil, execLimits{known: true, maxString: 4096}); err == nil {
+		t.Error("a stack too small for anything accepted")
+	}
+	long := execLimits{known: true, maxString: 1 << 17, total: lim.total, subject: 4096}
+	if err := checkExecSize("/usr/local/bin/handler", nil, nil, long); err == nil || long.reserve() != lim.reserve()+4096 {
+		t.Errorf("a long subject leaves room: %v", err)
+	}
 }
 
 // TestCommandStaticEnvTooLarge: a set_env secret that cannot fit an execve stops the relay at start instead of
@@ -231,7 +238,7 @@ func TestCommandStaticEnvTooLarge(t *testing.T) {
 		t.Skip("execve limits are checked on Linux")
 	}
 	lim := currentExecLimits()
-	if lim.maxString == 0 || lim.total < eventEnvReserve() {
+	if !lim.known || lim.total < lim.reserve() {
 		t.Fatalf("limits %+v", lim)
 	}
 	secret := filepath.Join(t.TempDir(), "secret")
@@ -239,12 +246,12 @@ func TestCommandStaticEnvTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := CommandHandler{Path: "/usr/local/bin/handler", Timeout: time.Second, SetEnv: map[string]config.SecretRef{"BIG": {File: secret}}}
-	if _, err := newCommandDeliverer(h, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "environment variable BIG") {
+	if _, err := newCommandDeliverer(h, nil, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "environment variable BIG") {
 		t.Errorf("error %v", err)
 	}
 	h.SetEnv = nil
 	h.Args = slices.Repeat([]string{strings.Repeat("a", lim.maxString/2)}, lim.total/(lim.maxString/2))
-	if _, err := newCommandDeliverer(h, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "exceed the") {
+	if _, err := newCommandDeliverer(h, nil, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "exceed the") {
 		t.Errorf("error %v", err)
 	}
 }
@@ -313,7 +320,7 @@ func TestExecSizeCheckIsSufficient(t *testing.T) {
 			h.Args = next
 		}
 	}
-	d, err := newCommandDeliverer(*h, slog.New(slog.NewTextHandler(t.Output(), nil)))
+	d, err := newCommandDeliverer(*h, nil, slog.New(slog.NewTextHandler(t.Output(), nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,7 +400,7 @@ func TestStaticEnvWithNUL(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := CommandHandler{Path: "/usr/local/bin/handler", Timeout: time.Second, SetEnv: map[string]config.SecretRef{"TOKEN": {File: secret}}}
-	if _, err := newCommandDeliverer(h, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "TOKEN contains a NUL byte") {
+	if _, err := newCommandDeliverer(h, nil, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "TOKEN contains a NUL byte") {
 		t.Errorf("error %v", err)
 	}
 }

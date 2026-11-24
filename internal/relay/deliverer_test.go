@@ -40,7 +40,7 @@ func command(t *testing.T, timeout time.Duration, args ...string) *commandDelive
 	t.Helper()
 	h := helperHandler(t, args...).Command
 	h.Timeout = timeout
-	d, err := newCommandDeliverer(*h, slog.New(slog.NewTextHandler(t.Output(), nil)))
+	d, err := newCommandDeliverer(*h, nil, slog.New(slog.NewTextHandler(t.Output(), nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestCommandStartErrors(t *testing.T) {
 	}
 	for _, path := range []string{filepath.Join(dir, "missing"), noExec, garbage, dir, loop, filepath.Join(noExec, "x")} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			d, err := newCommandDeliverer(CommandHandler{Path: path, Timeout: time.Second}, slog.New(slog.DiscardHandler))
+			d, err := newCommandDeliverer(CommandHandler{Path: path, Timeout: time.Second}, nil, slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -174,7 +174,7 @@ func TestCommandInputs(t *testing.T) {
 	h := helperHandler(t, "record", dir).Command
 	h.EnvAllow = []string{"RELAY_TEST_ALLOWED", "RELAY_TEST_UNSET"}
 	h.SetEnv = map[string]config.SecretRef{"TOKEN": {Env: "RELAY_TEST_SECRET_SRC"}, "OPTIONAL": {Env: "RELAY_TEST_UNSET", Optional: true}}
-	d, err := newCommandDeliverer(*h, slog.New(slog.DiscardHandler))
+	d, err := newCommandDeliverer(*h, nil, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}

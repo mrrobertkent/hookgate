@@ -27,7 +27,7 @@ func currentExecLimits() execLimits {
 	case rl.Cur != unix.RLIM_INFINITY:
 		total = int(min(uint64(total), rl.Cur/4))
 		// The ARG_MAX floor holds only if the stack can grow that far.
-		return execLimits{maxString: 32 * page, total: min(max(total, linuxArgMax), int(min(rl.Cur, linuxStkLim))&^(page-1))}
+		return execLimits{known: true, maxString: 32 * page, total: min(max(total, linuxArgMax), int(min(rl.Cur, linuxStkLim))&^(page-1))}
 	}
-	return execLimits{maxString: 32 * page, total: max(total, linuxArgMax)}
+	return execLimits{known: true, maxString: 32 * page, total: max(total, linuxArgMax)}
 }

@@ -7,14 +7,16 @@ import (
 )
 
 // execLimits are the kernel's limits on what execve copies: each argument and environment string, and all of
-// them together with their pointers. A zero limit is not checked.
+// them together with their pointers. Nothing is checked unless known.
 type execLimits struct {
+	known     bool
 	maxString int // longest string, terminating NUL included (MAX_ARG_STRLEN)
 	total     int // strings, NULs and pointers together
+	subject   int // the longest configured subject, which HOOKGATE_SUBJECT may carry
 }
 
-// Upper bounds of the per-event environment (eventEnv): HOOKGATE_HEADERS at the broker's 64 KiB header limit, and
-// the other variables, whose values the contract keeps to a few hundred bytes each.
+// Upper bounds of the per-event environment (eventEnv): 64 KiB of HOOKGATE_HEADERS JSON, the subject, and the
+// other variables, whose values the contract keeps to a few hundred bytes each.
 const (
 	eventEnvVars        = 11
 	maxHeadersJSONBytes = 64 << 10
@@ -41,9 +43,9 @@ func fixedOverhead(path string) int {
 	return len(path) + 1 + maxInterpreters*perInterpreter + execSlack
 }
 
-// eventEnvReserve is the most the per-event environment can add to an execve, pointers included.
-func eventEnvReserve() int {
-	return maxHeadersJSONBytes + maxEventScalarBytes + eventEnvVars*pointerSize
+// reserve is the room kept for the per-event environment, pointers included.
+func (lim execLimits) reserve() int {
+	return maxHeadersJSONBytes + maxEventScalarBytes + lim.subject + eventEnvVars*pointerSize
 }
 
 // envSize is what strings add to an execve, NULs and pointers included.
@@ -58,7 +60,7 @@ func envSize(strs []string) int {
 // withinReserve reports whether an event's environment fits what the start check reserved for it, so that an
 // execve failing as too large is not the event's doing.
 func (lim execLimits) withinReserve(eventEnv []string) bool {
-	if lim.total == 0 {
+	if !lim.known {
 		return false
 	}
 	for _, s := range eventEnv {
@@ -66,7 +68,7 @@ func (lim execLimits) withinReserve(eventEnv []string) bool {
 			return false
 		}
 	}
-	return envSize(eventEnv) <= eventEnvReserve()
+	return envSize(eventEnv) <= lim.reserve()
 }
 
 // checkExecSize rejects fixed arguments and environment that leave no room for the per-event variables, so that
@@ -88,14 +90,14 @@ func checkExecSize(path string, args, env []string, lim execLimits) error {
 		if strings.IndexByte(s, 0) >= 0 {
 			return fmt.Errorf("%s contains a NUL byte", where[i])
 		}
-		if lim.maxString > 0 && n > lim.maxString {
+		if lim.known && n > lim.maxString {
 			return fmt.Errorf("%s: %d bytes, above the %d-byte limit for one argument or environment string", where[i], len(s), lim.maxString-1)
 		}
 		size += n + pointerSize
 	}
-	if lim.total > 0 && size+eventEnvReserve() > lim.total {
+	if lim.known && size+lim.reserve() > lim.total {
 		return fmt.Errorf("handler.command: arguments and environment take %d bytes; with up to %d bytes of HOOKGATE_ variables per event they exceed the %d-byte limit of one execve (a quarter of the stack size limit)",
-			size, eventEnvReserve(), lim.total)
+			size, lim.reserve(), lim.total)
 	}
 	return nil
 }
