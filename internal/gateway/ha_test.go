@@ -601,7 +601,7 @@ func TestReadyzDoesNotWaitForReconnect(t *testing.T) {
 	conn := in.g.conns["ev"]
 
 	// Measure how long the client's own status call waits, to show that a reconnect attempt did stall.
-	stalled := measureLongest(func() { conn.IsConnected() })
+	stalled := measureLongest(t, func() { conn.IsConnected() })
 	proxy.SetDown(true)
 	// A request admitted before the loss was sampled runs its output timeout; measure from the sample.
 	testutil.Eventually(t, 2*time.Second, func() bool { return !conn.Status().Connected }, "loss not sampled")
@@ -657,10 +657,12 @@ func startStallServer(t *testing.T) net.Listener {
 	return stall
 }
 
-// measureLongest calls f continuously until the returned function is called, which returns the longest call.
-func measureLongest(f func()) func() time.Duration {
+// measureLongest calls f continuously until the returned function is called, which returns the longest call, or
+// until the test ends.
+func measureLongest(t *testing.T, f func()) func() time.Duration {
 	var longest time.Duration
 	stop := make(chan struct{})
+	var once sync.Once
 	var wg sync.WaitGroup
 	wg.Go(func() {
 		for {
@@ -674,9 +676,11 @@ func measureLongest(f func()) func() time.Duration {
 			longest = max(longest, time.Since(start))
 		}
 	})
-	return func() time.Duration {
-		close(stop)
+	end := func() time.Duration {
+		once.Do(func() { close(stop) })
 		wg.Wait()
 		return longest
 	}
+	t.Cleanup(func() { end() })
+	return end
 }
