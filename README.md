@@ -44,7 +44,7 @@ flowchart LR
 ```
 
 1. The request path, and the host when the source lists hosts, selects a source; anything else is `404`.
-2. Method, query string, encoding and the source's body cap `max_body_bytes` are checked (`405`, `400`, `415`, `413`). The cap is abuse protection, set above anything the sender legitimately sends. With the JetStream output, a body within the cap is never refused for its size: one over `inline_max_bytes` goes through the claim check.
+2. Method, query string, encoding and the source's body cap `max_body_bytes` are checked (`405`, `400`, `415`, `413`). The cap is abuse protection, set above anything the sender legitimately sends. With the JetStream output, a body within the cap is published inline, or through the claim check when it is over `inline_max_bytes`.
 3. Every check of the source runs against the raw body. A failure returns `401` and nothing is delivered.
 4. The verified bytes go to the source's output. An HTTP output retries transport errors and `5xx` responses on the next instance and returns the upstream's response; a JetStream output answers `200` once the stream has stored the event and `503` when it cannot.
 
