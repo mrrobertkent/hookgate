@@ -46,6 +46,29 @@ func eventEnvReserve() int {
 	return maxHeadersJSONBytes + maxEventScalarBytes + eventEnvVars*pointerSize
 }
 
+// envSize is what strings add to an execve, NULs and pointers included.
+func envSize(strs []string) int {
+	n := 0
+	for _, s := range strs {
+		n += len(s) + 1 + pointerSize
+	}
+	return n
+}
+
+// withinReserve reports whether an event's environment fits what the start check reserved for it, so that an
+// execve failing as too large is not the event's doing.
+func (lim execLimits) withinReserve(eventEnv []string) bool {
+	if lim.total == 0 {
+		return false
+	}
+	for _, s := range eventEnv {
+		if len(s)+1 > lim.maxString {
+			return false
+		}
+	}
+	return envSize(eventEnv) <= eventEnvReserve()
+}
+
 // checkExecSize rejects fixed arguments and environment that leave no room for the per-event variables, so that
 // an execve can fail as too large only because of one event's own headers.
 func checkExecSize(path string, args, env []string, lim execLimits) error {

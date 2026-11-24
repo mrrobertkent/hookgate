@@ -10,11 +10,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/mrrobertkent/hookgate/internal/config"
@@ -430,5 +432,39 @@ func TestRetryAfterOnLastAttempt(t *testing.T) {
 	r.cfg.MaxAttempts = 2
 	if p := r.handlerPlan(context.Background(), m, result{verdict: verdictRetry, after: time.Minute}, nil); p.action != actRetry || p.after != time.Minute {
 		t.Errorf("plan %+v", p)
+	}
+}
+
+// TestTooLargeWithinReserve: an execve that fails as too large although the event fits the reserved room is a
+// configuration fault, not the event's.
+func TestTooLargeWithinReserve(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("execve limits are checked on Linux")
+	}
+	h := helperHandler(t, "exit", "0").Command
+	h.Timeout = 10 * time.Second
+	lim := currentExecLimits()
+	// Built directly, past the start check, to stand for room taken by something the check cannot see.
+	d := &commandDeliverer{cfg: *h, limits: lim, log: slog.New(slog.DiscardHandler)}
+	for i := range 2*lim.total/lim.maxString + 2 {
+		d.env = append(d.env, "F"+strconv.Itoa(i)+"="+strings.Repeat("f", lim.maxString/2))
+	}
+	if res := d.deliver(context.Background(), testEvent()); res.verdict != verdictPause {
+		t.Errorf("%s %q", res.verdict, res.detail)
+	}
+}
+
+func TestReplayMarkerAnyValue(t *testing.T) {
+	r := &Relay{replaySubject: "webhooks.replay.rex"}
+	for _, v := range [][]string{{""}, {"", "WEBHOOK_DEAD:1"}, {"WEBHOOK_DEAD:1"}} {
+		if r.checkReplay(eventSubj, nats.Header{contract.HeaderReplay: v}) == nil {
+			t.Errorf("marker %q accepted on %s", v, eventSubj)
+		}
+	}
+	if r.checkReplay("webhooks.replay.rex", nats.Header{contract.HeaderReplay: {"WEBHOOK_DEAD:1"}}) != nil {
+		t.Error("own replay refused")
+	}
+	if r.checkReplay(eventSubj, nats.Header{}) != nil {
+		t.Error("plain event refused")
 	}
 }

@@ -33,9 +33,10 @@ const (
 
 // commandDeliverer runs the configured program once per event.
 type commandDeliverer struct {
-	cfg CommandHandler
-	env []string // env_allow copies and set_env values, fixed at start
-	log *slog.Logger
+	cfg    CommandHandler
+	env    []string // env_allow copies and set_env values, fixed at start
+	limits execLimits
+	log    *slog.Logger
 }
 
 // newCommandDeliverer resolves set_env secrets once, at start, and checks that they and the arguments fit an execve.
@@ -61,10 +62,11 @@ func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDelivere
 			env = append(env, name+"="+v)
 		}
 	}
-	if err := checkExecSize(cfg.Path, cfg.Args, env, currentExecLimits()); err != nil {
+	limits := currentExecLimits()
+	if err := checkExecSize(cfg.Path, cfg.Args, env, limits); err != nil {
 		return nil, err
 	}
-	return &commandDeliverer{cfg: cfg, env: env, log: log}, nil
+	return &commandDeliverer{cfg: cfg, env: env, limits: limits, log: log}, nil
 }
 
 func (c *commandDeliverer) deliver(ctx context.Context, ev *event) result {
@@ -86,6 +88,10 @@ func (c *commandDeliverer) deliver(ctx context.Context, ev *event) result {
 	isolate(cmd)
 	err := run(runCtx, cmd)
 	res := c.classify(ctx, runCtx, cmd, err)
+	if cmd.Process == nil && startFailure(err) == startTooLarge && c.limits.withinReserve(evEnv) {
+		// The start check left room for this event; what took it is outside the relay's view.
+		res = resultf(verdictPause, "start %s: argument list too long although the event fits the room reserved for it; an interpreter or the stack limit leaves less than the relay assumes", c.cfg.Path)
+	}
 	if res.verdict != verdictAck {
 		c.log.Warn("handler failed", "seq", ev.streamSeq, "attempt", ev.attempt, "result", res.verdict.String(),
 			"detail", res.detail, "stderr", stderr.String())
