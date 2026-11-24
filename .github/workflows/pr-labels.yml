@@ -1,0 +1,23 @@
+name: pr-labels
+
+on:
+  pull_request:
+    types: [opened, labeled, unlabeled, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  type-label:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require exactly one type/* label
+        env:
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          mapfile -t types < <(jq -r '.[] | select(startswith("type/"))' <<<"$LABELS")
+          if [ "${#types[@]}" -ne 1 ]; then
+            echo "::error::A pull request needs exactly one type/* label; found ${#types[@]}: ${types[*]}"
+            exit 1
+          fi
+          echo "type label: ${types[0]}"
