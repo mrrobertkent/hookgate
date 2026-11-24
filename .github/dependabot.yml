@@ -10,5 +10,5 @@ updates:
     directory: /
     schedule: {interval: weekly}
   - package-ecosystem: docker-compose
-    directories: [/examples/compose, /examples/otel-collector]
+    directories: [/examples/compose, /examples/otel-collector, /examples/jetstream]
     schedule: {interval: weekly}
