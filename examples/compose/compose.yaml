@@ -2,7 +2,7 @@ name: hookgate
 
 services:
   hookgate:
-    image: ghcr.io/mrrobertkent/hookgate:0.1.2@sha256:42a83e40387977d24a1f8e1ca8908cc9fec1a7fcf04fad2ace9ddf30185c976e
+    image: ghcr.io/mrrobertkent/hookgate:0.2.0@sha256:319b6f8c0cedb815014829451fab873c8be00e13ea21e68984bcb3caba63702a
     restart: unless-stopped
     ports:
       - "127.0.0.1:8080:8080"     # webhooks, for a reverse proxy on the host; proxy containers use hookgate:8080

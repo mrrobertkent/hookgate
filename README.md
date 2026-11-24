@@ -70,7 +70,8 @@ sources:
 EOF
 
 docker run --rm --network hookgate-demo -p 8080:8080 -e GITHUB_WEBHOOK_SECRET=demo-secret-change-me \
-  -v "$PWD/hookgate.yaml:/etc/hookgate/hookgate.yaml:ro" ghcr.io/mrrobertkent/hookgate
+  -v "$PWD/hookgate.yaml:/etc/hookgate/hookgate.yaml:ro" \
+  ghcr.io/mrrobertkent/hookgate:0.2.0@sha256:319b6f8c0cedb815014829451fab873c8be00e13ea21e68984bcb3caba63702a
 ```
 
 Send a signed request and a forged one:

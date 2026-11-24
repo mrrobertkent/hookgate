@@ -89,6 +89,16 @@ jobs:
         run: |
           go run ../../cmd/hookgate validate -config hookgate.yaml
           docker compose --profile demo config --quiet
+      - name: Validate the examples with their pinned hookgate images
+        env:
+          GITHUB_WEBHOOK_SECRET: example-github-secret
+          STORAGE_WEBHOOK_TOKEN: example-token-value
+          STORAGE_SIGNING_SECRET: example-signing-secret
+          UPSTREAM_TOKEN: example-upstream-token
+        run: |
+          for dir in examples/compose examples/otel-collector; do
+            docker compose --project-directory "$dir" run --rm --no-deps hookgate validate
+          done
 
   lint:
     runs-on: ubuntu-latest
