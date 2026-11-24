@@ -21,7 +21,7 @@ sources:
       jetstream:
         connection: events
         stream: WEBHOOK_EVENTS
-        pass_headers: [Content-Type]
+        pass_headers: [Content-Type, X-Poison]
         message_id: {header: X-Event-Id, unauthenticated: true}
         claim_check:
           object_store: {bucket: WEBHOOK_CLAIMS}

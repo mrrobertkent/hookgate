@@ -1,0 +1,25 @@
+# hookgate-relay: deliver events from the WEBHOOK_EVENTS stream to an HTTP handler.
+admin_listen: ":9091"
+connection:
+  nats:
+    urls: ["nats://nats-a:4222", "nats://nats-b:4222", "nats://nats-c:4222"]
+    nkey_seed: {env: RELAY_NKEY_SEED}
+stream: WEBHOOK_EVENTS
+consumer: app
+filter_subjects: [webhooks.events.resend, webhooks.replay.app]
+pass_headers: [content-type, webhook-*, svix-*]
+concurrency: 4
+max_attempts: 10
+backoff: [10s, 1m, 5m, 15m, 1h]
+claim_check:
+  object_store: {bucket: WEBHOOK_CLAIMS}
+dead_letter:
+  stream: WEBHOOK_DEAD
+drain_timeout: 25s
+shutdown_nak_delay: 5s
+handler:
+  http:
+    url: http://app:8080/webhooks
+    timeout: 30s
+    set_headers:
+      Authorization: {env: APP_AUTHORIZATION}

@@ -28,13 +28,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            os="${target%/*}"; arch="${target#*/}"
-            name="hookgate_${VERSION#v}_${os}_${arch}"
-            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
-              -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/hookgate" ./cmd/hookgate
-            cp LICENSE README.md "dist/$name/"
-            tar -C dist -czf "dist/$name.tar.gz" "$name"
+          for bin in hookgate hookgate-relay; do
+            for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+              os="${target%/*}"; arch="${target#*/}"
+              name="${bin}_${VERSION#v}_${os}_${arch}"
+              CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -trimpath \
+                -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$name/$bin" "./cmd/$bin"
+              cp LICENSE README.md "dist/$name/"
+              tar -C dist -czf "dist/$name.tar.gz" "$name"
+            done
           done
           (cd dist && sha256sum ./*.tar.gz > checksums.txt)
 
@@ -84,17 +86,49 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
         run: cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}@${DIGEST}"
 
+      - id: relay-meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository }}-relay
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - id: relay-build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.relay
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: VERSION=${{ github.ref_name }}
+          tags: ${{ steps.relay-meta.outputs.tags }}
+          labels: ${{ steps.relay-meta.outputs.labels }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ghcr.io/${{ github.repository }}-relay
+          subject-digest: ${{ steps.relay-build.outputs.digest }}
+          push-to-registry: true
+      - name: Sign the relay image
+        env:
+          DIGEST: ${{ steps.relay-build.outputs.digest }}
+        run: cosign sign --yes "ghcr.io/${GITHUB_REPOSITORY}-relay@${DIGEST}"
+
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           DIGEST: ${{ steps.build.outputs.digest }}
+          RELAY_DIGEST: ${{ steps.relay-build.outputs.digest }}
         run: |
           set -euo pipefail
           {
             echo "Container image: \`ghcr.io/${GITHUB_REPOSITORY}:${TAG#v}\`"
             echo
             echo "Digest: \`${DIGEST}\`"
+            echo
+            echo "Relay image: \`ghcr.io/${GITHUB_REPOSITORY}-relay:${TAG#v}\`"
+            echo
+            echo "Digest: \`${RELAY_DIGEST}\`"
           } > image.md
           gh release create "$TAG" dist/*.tar.gz dist/checksums.txt dist/checksums.txt.sigstore.json dist/*.intoto.jsonl --verify-tag --generate-notes --notes-file image.md
       - name: Ask the Go module proxy to index the release

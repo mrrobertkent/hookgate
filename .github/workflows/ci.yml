@@ -28,6 +28,11 @@ jobs:
         run: go test -run='^$' -fuzz='^FuzzStandardWebhooks$' -fuzztime=60s ./internal/verify
       - name: Fuzz the Standard Webhooks secret decoder
         run: go test -run='^$' -fuzz=FuzzStandardWebhooksSecret -fuzztime=30s ./internal/verify
+      - name: Fuzz relay message headers and filter subjects
+        run: |
+          go test -run='^$' -fuzz=FuzzMessageHeaders -fuzztime=30s ./internal/relay
+          go test -run='^$' -fuzz=FuzzFilterSubject -fuzztime=30s ./internal/relay
+          go test -run='^$' -fuzz=FuzzReplayIsolation -fuzztime=30s ./internal/relay
       - name: Fuzz subject templates and event IDs
         run: |
           go test -run='^$' -fuzz=FuzzSubjectTemplate -fuzztime=30s ./internal/contract
@@ -41,6 +46,12 @@ jobs:
           CLICKHOUSE_USER: webhooks
           CLICKHOUSE_PASSWORD: example-password
         run: go run ./cmd/hookgate validate -config examples/hookgate.yaml
+      - name: Validate the relay example
+        env:
+          APP_AUTHORIZATION: Bearer example-token
+        run: |
+          RELAY_NKEY_SEED=$(go run github.com/nats-io/nkeys/nk -gen user) \
+            go run ./cmd/hookgate-relay validate -config examples/relay.yaml
       - name: Validate the OpenTelemetry Collector example
         working-directory: examples/otel-collector
         env:
@@ -66,8 +77,10 @@ jobs:
           DEMO_WEBHOOK_TOKEN: example-token-value
         run: |
           mkdir -p keys
-          go run github.com/nats-io/nkeys/nk -gen user > keys/hookgate.nk
+          for k in hookgate relay replay; do go run github.com/nats-io/nkeys/nk -gen user > "keys/$k.nk"; done
           go run ../../cmd/hookgate validate -config hookgate.yaml
+          go run ../../cmd/hookgate-relay validate -config relay.yaml
+          go run ../../cmd/hookgate-relay validate -config replay.yaml
           docker compose config --quiet
       - name: Validate the Docker Compose example
         working-directory: examples/compose
@@ -124,5 +137,11 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
+          platforms: linux/amd64,linux/arm64
+          push: false
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: Dockerfile.relay
           platforms: linux/amd64,linux/arm64
           push: false

@@ -22,20 +22,24 @@ services:
     command: ["sh", "/scripts/keys.sh"]
     volumes:
       - ./keys.sh:/scripts/keys.sh:ro
-      - keys:/keys
+      - keys-nats:/keys/nats
+      - keys-admin:/keys/admin
+      - keys-hookgate:/keys/hookgate
+      - keys-relay:/keys/relay
+      - keys-replay:/keys/replay
 
   nats-1:
     <<: *nats
     environment: {NATS_SERVER_NAME: nats-1}
-    volumes: [./nats.conf:/etc/nats/nats.conf:ro, keys:/etc/nats/keys:ro, nats-1:/data]
+    volumes: [./nats.conf:/etc/nats/nats.conf:ro, keys-nats:/etc/nats/keys:ro, nats-1:/data]
   nats-2:
     <<: *nats
     environment: {NATS_SERVER_NAME: nats-2}
-    volumes: [./nats.conf:/etc/nats/nats.conf:ro, keys:/etc/nats/keys:ro, nats-2:/data]
+    volumes: [./nats.conf:/etc/nats/nats.conf:ro, keys-nats:/etc/nats/keys:ro, nats-2:/data]
   nats-3:
     <<: *nats
     environment: {NATS_SERVER_NAME: nats-3}
-    volumes: [./nats.conf:/etc/nats/nats.conf:ro, keys:/etc/nats/keys:ro, nats-3:/data]
+    volumes: [./nats.conf:/etc/nats/nats.conf:ro, keys-nats:/etc/nats/keys:ro, nats-3:/data]
 
   # Creates the stream and the bucket once the cluster is up; also the NATS CLI for the commands in README.md.
   setup:
@@ -46,7 +50,7 @@ services:
       NATS_NKEY: /keys/admin.nk
     volumes:
       - ./setup.sh:/scripts/setup.sh:ro
-      - keys:/keys:ro
+      - keys-admin:/keys:ro
     depends_on:
       nats-1: {condition: service_healthy}
       nats-2: {condition: service_healthy}
@@ -61,7 +65,7 @@ services:
       DEMO_WEBHOOK_TOKEN: ${DEMO_WEBHOOK_TOKEN:-demo-token-change-me}
     volumes:
       - ./hookgate.yaml:/etc/hookgate/hookgate.yaml:ro
-      - keys:/etc/hookgate/keys:ro
+      - keys-hookgate:/etc/hookgate/keys:ro
     ports:
       - "127.0.0.1:8080:8080"
       - "127.0.0.1:9090:9090"
@@ -72,8 +76,57 @@ services:
     depends_on:
       setup: {condition: service_completed_successfully}
 
+  # Stand-in for your application: accepts events, rejects those marked x-poison (see Caddyfile).
+  handler:
+    image: caddy:2.10.2-alpine@sha256:4c6e91c6ed0e2fa03efd5b44747b625fec79bc9cd06ac5235a779726618e530d
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # Delivers the consumer's events to the handler.
+  relay:
+    build:
+      context: ../..
+      dockerfile: Dockerfile.relay
+    image: hookgate-relay:jetstream-example
+    working_dir: /etc/hookgate
+    volumes:
+      - ./relay.yaml:/etc/hookgate/relay.yaml:ro
+      - keys-relay:/etc/hookgate/keys:ro
+    ports:
+      - "127.0.0.1:9091:9091"
+    stop_grace_period: 40s        # above drain_timeout (25s) + 15s
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      setup: {condition: service_completed_successfully}
+      handler: {condition: service_healthy}
+
+  # The operator's replay command, with its own identity: `docker compose run --rm replay -seq N`.
+  replay:
+    image: hookgate-relay:jetstream-example
+    profiles: [tools]
+    entrypoint: ["hookgate-relay", "replay", "-config", "/etc/hookgate/replay.yaml"]
+    working_dir: /etc/hookgate
+    volumes:
+      - ./replay.yaml:/etc/hookgate/replay.yaml:ro
+      - keys-replay:/etc/hookgate/keys:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
 volumes:
-  keys:
+  keys-nats:
+  keys-admin:
+  keys-hookgate:
+  keys-relay:
+  keys-replay:
   nats-1:
   nats-2:
   nats-3:

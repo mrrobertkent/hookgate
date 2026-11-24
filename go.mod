@@ -10,6 +10,7 @@ require (
 	github.com/nats-io/nuid v1.0.1
 	github.com/standard-webhooks/standard-webhooks/libraries v1.3.0
 	go.yaml.in/yaml/v3 v3.0.6
+	golang.org/x/sys v0.50.0
 )
 
 require (
@@ -18,6 +19,5 @@ require (
 	github.com/klauspost/compress v1.20.4 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
 	golang.org/x/crypto v0.58.0 // indirect
-	golang.org/x/sys v0.50.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 )
