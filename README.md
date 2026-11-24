@@ -40,11 +40,11 @@ flowchart LR
     B[Sender B] --> G
     G[hookgate<br/>limits → checks → output] -->|verified bytes| U[(Collector / ClickHouse / app)]
     G -->|verified bytes| J[(NATS JetStream)]
-    G -.->|forged, missing or oversized| X[rejected, never delivered]
+    G -.->|unsigned, forged or over the body cap| X[rejected, never delivered]
 ```
 
 1. The request path, and the host when the source lists hosts, selects a source; anything else is `404`.
-2. Method, query string, encoding and body size are checked (`405`, `400`, `415`, `413`).
+2. Method, query string, encoding and the source's body cap `max_body_bytes` are checked (`405`, `400`, `415`, `413`). The cap is abuse protection, set above anything the sender legitimately sends; with the JetStream output, any body under it is delivered, large ones through the claim check.
 3. Every check of the source runs against the raw body. A failure returns `401` and nothing is delivered.
 4. The verified bytes go to the source's output. An HTTP output retries transport errors and `5xx` responses on the next instance and returns the upstream's response; a JetStream output answers `200` once the stream has stored the event and `503` when it cannot.
 
