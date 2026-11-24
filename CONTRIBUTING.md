@@ -35,6 +35,6 @@ Keep the dependency list short. hookgate depends on the Go standard library, a Y
 
 - One logical change per pull request, with tests.
 - Title it `Area: imperative summary`, for example `Verify: Standard Webhooks signatures`.
-- Fill in the [pull request template](.github/pull_request_template.md). "What changes for users" becomes the release note; a breaking change goes in its `> [!IMPORTANT]` block. Link the issues, docs, upstream sources and files the change relies on, and list the commands you ran with their results.
+- Fill in the [pull request template](.github/pull_request_template.md). The title is the line in the generated release notes and "What changes for users" is the source for the release summary; a breaking change goes in its `> [!IMPORTANT]` block. Link the issues, docs, upstream sources and files the change relies on, and list the commands you ran with their results.
 - Label it with exactly one `type/*` label: `type/feature`, `type/fix`, `type/docs`, `type/ci`, `type/deps`, `type/refactor`, `type/test` or `type/security`. The `pr-labels` check fails without one, and release notes are grouped by it. Add any `area/*` labels that apply and `breaking-change` when users must change configuration, handlers or deployment. A maintainer labels pull requests from contributors who cannot.
 - By contributing you agree that your contribution is licensed under the Apache License 2.0.

@@ -10,7 +10,7 @@ Delete any section that does not apply, and these comments.
 
 ## What changes for users
 
-<!-- The release note: behaviour, configuration keys, metrics, images. Write "None" for internal changes. -->
+<!-- Behaviour, configuration keys, metrics, images; the release summary is written from this. Write "None" for internal changes. -->
 
 -
 
