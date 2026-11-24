@@ -52,6 +52,7 @@ type Relay struct {
 
 	mu            sync.Mutex
 	connected     bool // the connection's recorded status, which never waits on the client's lock
+	rejected      bool // the connection's credentials are rejected
 	checkErr      error
 	pauseErr      error
 	draining      bool
@@ -153,12 +154,17 @@ func (r *Relay) connect() error {
 	nc, err := natsconn.Connect("relay-"+r.cfg.Consumer, r.cfg.Connection.NATS, r.log, natsconn.Callbacks{
 		Connected: func(*nats.Conn) { r.trigger() },
 		Sampled: func(prev, cur natsconn.Status) {
+			r.setRejected(prev, cur)
 			if prev.Connected != cur.Connected {
 				r.setConnected(cur.Connected)
 			}
 		},
 	})
 	if err != nil {
+		if natsconn.IsUnusableCredentials(err) {
+			r.setRejected(natsconn.Status{}, natsconn.Status{Rejected: true})
+			r.log.Error("nats credentials cannot be loaded; fix them and restart the relay", "error", err)
+		}
 		return err
 	}
 	js, err := jetstream.New(nc.Conn)
@@ -197,6 +203,19 @@ func (r *Relay) signal() {
 	}
 }
 
+// setRejected records the connection's credential state; a new rejection is logged. The server's own text is not
+// logged: it may echo what the relay sent.
+func (r *Relay) setRejected(prev, cur natsconn.Status) {
+	r.mu.Lock()
+	r.rejected = cur.Rejected
+	r.mu.Unlock()
+	r.m.rejected.SetBool(cur.Rejected)
+	r.updateReady()
+	if cur.Rejected && !prev.Rejected && cur.Err != nil {
+		r.log.Error("nats credentials rejected; the relay is not ready until they are fixed")
+	}
+}
+
 func (r *Relay) setConnected(up bool) {
 	r.mu.Lock()
 	r.connected = up
@@ -216,6 +235,8 @@ func (r *Relay) notReadyLocked() error {
 	switch {
 	case r.draining:
 		return errors.New("draining")
+	case r.rejected:
+		return errors.New("NATS credentials rejected")
 	case r.pauseErr != nil:
 		return fmt.Errorf("paused until restart: %w", r.pauseErr)
 	case !r.connected:

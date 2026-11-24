@@ -87,10 +87,14 @@ func TestConfigFaultsFailWithoutConnecting(t *testing.T) {
 	}
 	for name, auth := range cases {
 		cfg := conn([]string{"nats://127.0.0.1:1"}, auth)
-		if _, err := Connect("test", cfg, discard, Callbacks{}); err == nil {
+		_, err := Connect("test", cfg, discard, Callbacks{})
+		switch {
+		case err == nil:
 			t.Errorf("%s: connected", name)
-		} else if strings.Contains(err.Error(), "not a seed") {
+		case strings.Contains(err.Error(), "not a seed"):
 			t.Errorf("%s: error carries the secret: %v", name, err)
+		case !IsUnusableCredentials(err) || !IsCredentialError(err):
+			t.Errorf("%s: not a credential error: %v", name, err)
 		}
 	}
 }

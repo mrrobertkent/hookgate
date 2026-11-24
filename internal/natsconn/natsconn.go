@@ -192,18 +192,32 @@ func (c *Conn) setConnectError(err error) {
 	c.lastErr.Store(&err)
 }
 
+// unusableCredentials marks a credential or certificate that could not be loaded: missing, unreadable or
+// rejected by the parser that loads it.
+type unusableCredentials struct{ err error }
+
+func (e unusableCredentials) Error() string { return e.err.Error() }
+func (e unusableCredentials) Unwrap() error { return e.err }
+
+// IsUnusableCredentials reports an Options or Connect error caused by a credential or certificate that could not
+// be loaded.
+func IsUnusableCredentials(err error) bool {
+	var unusable unusableCredentials
+	return errors.As(err, &unusable)
+}
+
 // Options returns the authentication and TLS options for cfg, resolving every secret reference. It fails when a
-// secret is missing or unusable, without connecting.
+// secret is missing or unusable, without connecting; IsUnusableCredentials reports such a failure.
 func Options(cfg config.NATSConnection) ([]nats.Option, error) {
 	auth, err := authOption(cfg)
 	if err != nil {
-		return nil, err
+		return nil, unusableCredentials{err}
 	}
 	opts := []nats.Option{auth}
 	if cfg.TLS != nil {
 		tc, err := tlsConfig(*cfg.TLS)
 		if err != nil {
-			return nil, err
+			return nil, unusableCredentials{err}
 		}
 		opts = append(opts, nats.Secure(tc))
 	}
@@ -317,7 +331,7 @@ func IsCredentialError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if isCertificateError(err) || isCredentialFileError(err) {
+	if IsUnusableCredentials(err) || isCertificateError(err) || isCredentialFileError(err) {
 		return true
 	}
 	msg := strings.ToLower(err.Error())

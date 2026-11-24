@@ -684,3 +684,53 @@ func measureLongest(t *testing.T, f func()) func() time.Duration {
 	t.Cleanup(func() { end() })
 	return end
 }
+
+// Credentials that cannot be loaded at start are reported like credentials the server rejects: the gauge is 1
+// from the start, the connection's source answers 503 and the other source serves.
+func TestUnusableCredentialsAtStartReported(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "bad")
+	if err := os.WriteFile(bad, []byte("not a seed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		auth     string
+		rejected float64
+	}{
+		"malformed seed":  {"nkey_seed: {file: " + bad + "}", 1},
+		"missing seed":    {"nkey_seed: {file: " + bad + "-missing}", 1},
+		"malformed creds": {"creds: {file: " + bad + "}", 1},
+		"unset token":     {"token: {env: HOOKGATE_TEST_UNSET_TOKEN}", 1},
+		"malformed ca":    {"none: true, tls: {ca: {file: " + bad + "}}", 1},
+		"broker down":     {"none: true", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			up := &captured{}
+			srv := httptest.NewServer(up.handler(http.StatusOK))
+			t.Cleanup(srv.Close)
+			t.Setenv("T", tokenValue)
+			in := startInstance(t, `
+connections:
+  ev:
+    nats: {urls: ["nats://127.0.0.1:1"], `+tc.auth+`}
+sources:
+  - name: ok
+    path: /ok
+    checks: [{token: {header: X-T, secrets: [{env: T}]}}]
+    output: {http: {urls: [`+srv.URL+`]}}
+  - name: events
+    path: /events
+    max_body_bytes: 65536
+    checks: [{token: {header: X-T, secrets: [{env: T}]}}]
+    output: {jetstream: {connection: ev, stream: EVENTS}}
+`, nil)
+			if v := in.metric(t, `hookgate_nats_credentials_rejected{connection="ev"}`); v != tc.rejected {
+				t.Errorf("credentials_rejected %v, want %v", v, tc.rejected)
+			}
+			for path, want := range map[string]int{"/ok": 200, "/events": 503} {
+				if code := post(in.g, path, "{}", map[string]string{"X-T": tokenValue}).Code; code != want {
+					t.Errorf("%s answered %d, want %d", path, code, want)
+				}
+			}
+		})
+	}
+}

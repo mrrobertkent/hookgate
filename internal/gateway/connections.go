@@ -65,6 +65,11 @@ func (g *Gateway) connect() (map[string]error, *watchers) {
 		})
 		if err != nil {
 			errs[name] = err
+			if natsconn.IsUnusableCredentials(err) {
+				g.m.rejected.SetBool(true, name)
+				g.log.Error("nats connection's credentials cannot be loaded; its sources answer 503 until they are fixed and hookgate is restarted",
+					"connection", name, "error", err)
+			}
 			continue
 		}
 		g.conns[name] = c
