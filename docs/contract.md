@@ -1,6 +1,6 @@
 # Event contract
 
-This is what a consumer of hookgate's JetStream output can rely on: subjects, message headers, identifiers, claim checks, delivery guarantees, what the sender is told, and how [`hookgate-relay`](relay.md) hands events to application handlers. It is versioned; any change to it is a breaking change for consumers and gets a new version.
+This is what a consumer of hookgate's JetStream output can rely on: subjects, message headers, identifiers, claim checks, delivery guarantees, what the sender is told, and how [`hookgate-relay`](relay.md) hands events to application handlers. Two parts are versioned separately. The message format (subjects, headers, identifiers, claim checks) carries the `Hookgate-Contract` version: a breaking change to it gets a new version, and the gateway and every consumer move to it together. The relay's handler interface (command inputs and exit codes, HTTP status mapping, dead-letter and replay records) follows `hookgate-relay`'s release version: a breaking change to it is a new minor release before 1.0 and a new major release after, flagged in the release notes.
 
 ## Version
 
