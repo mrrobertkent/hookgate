@@ -88,6 +88,9 @@ func (r *Relay) decide(work context.Context, m *message) plan {
 	h := m.msg.Headers()
 	size, sum, f := checkContract(h)
 	if f == nil {
+		f = r.checkReplay(m.msg.Subject(), h)
+	}
+	if f == nil {
 		m.claim, f = claimRef(h, m.msg.Data())
 	}
 	var body []byte

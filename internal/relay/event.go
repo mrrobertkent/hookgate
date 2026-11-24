@@ -84,6 +84,15 @@ func checkContract(h nats.Header) (int64, string, *failure) {
 	return size, sum, nil
 }
 
+// checkReplay accepts a replay only on this consumer's own replay subject, wherever routing put it: a replay meant
+// for another consumer never reaches this handler.
+func (r *Relay) checkReplay(subject string, h nats.Header) *failure {
+	if h.Get(contract.HeaderReplay) != "" && subject != r.replaySubject {
+		return invalid("replay received on %s, not on this consumer's replay subject", subject)
+	}
+	return nil
+}
+
 func invalid(format string, args ...any) *failure {
 	return &failure{reason: contract.DeadInvalidMessage, detail: fmt.Sprintf(format, args...)}
 }

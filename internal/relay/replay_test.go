@@ -140,14 +140,39 @@ func TestReplaySizeExact(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	e.capEventStream(t, size)
-	if err := rp.fit(ctx, msg, eventStream, "replay:WEBHOOK_DEAD:1"); err != nil {
+	if err := rp.fit(ctx, msg, e.stream(t), "replay:WEBHOOK_DEAD:1"); err != nil {
 		t.Fatalf("exact fit refused: %v", err)
 	}
 	if _, err := e.js.PublishMsg(ctx, msg, jetstream.WithExpectStream(eventStream), jetstream.WithMsgID("replay:WEBHOOK_DEAD:1")); err != nil {
 		t.Fatalf("broker refused the exact fit: %v", err)
 	}
 	e.capEventStream(t, size-1)
-	if err := rp.fit(ctx, msg, eventStream, "replay:WEBHOOK_DEAD:2"); err == nil {
+	if err := rp.fit(ctx, msg, e.stream(t), "replay:WEBHOOK_DEAD:2"); err == nil {
 		t.Fatal("oversized replay accepted without a claim check")
+	}
+}
+
+// TestReplayRefusesRewritingStream: a replay is not published into an event stream that could rewrite its subject.
+func TestReplayRefusesRewritingStream(t *testing.T) {
+	e := newEnv(t)
+	e.consumer(t, "rex")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := e.js.PublishMsg(ctx, &nats.Msg{Subject: "webhooks.dead.rex", Data: []byte("{}"), Header: nats.Header{
+		contract.HeaderDeadReason: {contract.DeadHandlerRejected}, contract.HeaderOriginalConsumer: {"rex"},
+		contract.HeaderOriginalStream: {eventStream}, contract.HeaderSource: {"resend"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.js.UpdateStream(ctx, jetstream.StreamConfig{Name: eventStream, Subjects: []string{"webhooks.events.>", "webhooks.replay.>"},
+		Duplicates: time.Minute, SubjectTransform: &jetstream.SubjectTransformConfig{Source: "webhooks.replay.*", Destination: "webhooks.events.{{wildcard(1)}}"}}); err != nil {
+		t.Fatal(err)
+	}
+	before := e.streamState(t)
+	if _, err := NewReplayer(e.config(t, "rex", helperHandler(t, "exit", "0")), e.js).Replay(ctx, 1); err == nil || !strings.Contains(err.Error(), "subject transform") {
+		t.Errorf("replay into a rewriting stream: %v", err)
+	}
+	if after := e.streamState(t); after != before {
+		t.Errorf("stored %d messages", after-before)
 	}
 }

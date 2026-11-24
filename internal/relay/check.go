@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -285,12 +286,14 @@ func checkRouting(where string, c jetstream.StreamConfig) error {
 	return fmt.Errorf("%s %s; the relay needs subjects stored as published", where, what)
 }
 
-// rewritesSource reports a source or mirror that stores messages under subjects other than their own.
+// rewritesSource reports a source or mirror that may store messages under subjects other than their own. A
+// transform keeps a subject only without a destination, or with a destination equal to its source and free of
+// mapping syntax ($n, {{...}}), which would rewrite even then.
 func rewritesSource(src *jetstream.StreamSource) bool {
 	if src == nil {
 		return false
 	}
 	return slices.ContainsFunc(src.SubjectTransforms, func(t jetstream.SubjectTransformConfig) bool {
-		return t.Destination != "" && t.Destination != t.Source
+		return t.Destination != "" && (t.Destination != t.Source || strings.ContainsAny(t.Destination, "${}"))
 	})
 }

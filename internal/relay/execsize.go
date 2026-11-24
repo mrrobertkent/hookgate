@@ -27,9 +27,9 @@ const pointerSize = 8
 // execSlack covers the stack slot below the strings and rounding.
 const execSlack = 4 << 10
 
-// An interpreter (a #! script or binfmt_misc) adds strings to the same budget: the program's path again, the
-// interpreter's path and an argument. The kernel follows at most 5 interpreters; binfmt_misc registrations, the
-// longer kind, are under 2 KiB.
+// An interpreter (a #! script or binfmt_misc) adds strings to the same budget: the path it was given (the
+// program's, or the previous interpreter's), its own path and an argument. The kernel follows at most 5
+// interpreters; binfmt_misc registrations, the longer kind, are under 2 KiB.
 const (
 	maxInterpreters      = 5
 	maxInterpreterString = 2 << 10
@@ -37,7 +37,8 @@ const (
 
 // fixedOverhead is what an execve of path copies besides argv and envp: the file name, and what interpreters add.
 func fixedOverhead(path string) int {
-	return len(path) + 1 + maxInterpreters*(len(path)+1+maxInterpreterString+2*pointerSize) + execSlack
+	perInterpreter := max(len(path)+1, maxInterpreterString) + 2*maxInterpreterString + 3*pointerSize
+	return len(path) + 1 + maxInterpreters*perInterpreter + execSlack
 }
 
 // eventEnvReserve is the most the per-event environment can add to an execve, pointers included.

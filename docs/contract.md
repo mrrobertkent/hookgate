@@ -171,7 +171,7 @@ Every variable is always set, empty when it has no value.
 | `78` (`EX_CONFIG`), `126`, `127`, or the program cannot be started (missing, not executable, not a valid executable) | Configuration fault. | Nak the event and pause the relay until restart. |
 | any other non-zero exit (`75` `EX_TEMPFAIL` included), timeout, killed by a signal (for example the OOM killer) | Failure that may pass. | Retry after the backoff delay. |
 
-A retry on the last allowed attempt dead-letters the event as `max_attempts`. A dead letter's detail is the exit status only (`exit status 65`). A start error that is a transient resource shortage (`EAGAIN`, `ENOMEM`, `ETXTBSY`, `EMFILE`, `ENFILE`) retries.
+A retry on the last allowed attempt dead-letters the event as `max_attempts`. For an exit, the dead letter's detail is the exit status only (`exit status 65`); a timeout, a signal or a start error is named instead. A start error that is a transient resource shortage (`EAGAIN`, `ENOMEM`, `ETXTBSY`, `EMFILE`, `ENFILE`) retries.
 
 Only `65` rejects, because an unknown failure is retried: runtimes exit `1` or `2` on an unhandled exception (Python and Node.js `1`, a Go panic `2`), often for a transient cause such as a lost database connection. Treating those exits as rejections would dead-letter transient failures on their first attempt. A handler that knows an event can never succeed exits `65`.
 

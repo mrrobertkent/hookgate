@@ -357,6 +357,7 @@ func TestCheckRoutingSources(t *testing.T) {
 		fail bool
 	}{
 		"plain source":     {jetstream.StreamConfig{Sources: []*jetstream.StreamSource{{Name: "A"}}}, false},
+		"mapping syntax":   {jetstream.StreamConfig{Sources: []*jetstream.StreamSource{{Name: "A", SubjectTransforms: []jetstream.SubjectTransformConfig{{Source: "foo.$0.replay.>", Destination: "foo.$0.replay.>"}}}}}, true},
 		"filtering source": {jetstream.StreamConfig{Sources: []*jetstream.StreamSource{{Name: "A", SubjectTransforms: same}}}, false},
 		"rewriting source": {jetstream.StreamConfig{Sources: []*jetstream.StreamSource{{Name: "A"}, {Name: "B", SubjectTransforms: rewrite}}}, true},
 		"rewriting mirror": {jetstream.StreamConfig{Mirror: &jetstream.StreamSource{Name: "A", SubjectTransforms: rewrite}}, true},
@@ -392,5 +393,42 @@ func TestStaticEnvWithNUL(t *testing.T) {
 	h := CommandHandler{Path: "/usr/local/bin/handler", Timeout: time.Second, SetEnv: map[string]config.SecretRef{"TOKEN": {File: secret}}}
 	if _, err := newCommandDeliverer(h, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "TOKEN contains a NUL byte") {
 		t.Errorf("error %v", err)
+	}
+}
+
+// TestReplayOnlyOnOwnSubject: an event carrying a replay marker that arrives on any other subject is
+// dead-lettered as invalid without running the handler.
+func TestReplayOnlyOnOwnSubject(t *testing.T) {
+	e := newEnv(t)
+	e.consumer(t, "rex")
+	dir := t.TempDir()
+	start(t, e.config(t, "rex", helperHandler(t, "record", dir)), true)
+	seq := e.publish(t, pub{body: []byte("{}"), extra: map[string]string{contract.HeaderReplay: "WEBHOOK_DEAD:1"}})
+	recs := e.waitDead(t, 1)
+	e.waitSettled(t, "rex", seq)
+	if got := recs[0].Header.Get(contract.HeaderDeadReason); got != contract.DeadInvalidMessage {
+		t.Errorf("reason %q", got)
+	}
+	if n := len(readRecords(t, dir)); n != 0 {
+		t.Errorf("handler ran %d times", n)
+	}
+	own := e.publish(t, pub{body: []byte("{}"), subject: "webhooks.replay.rex", extra: map[string]string{contract.HeaderReplay: "WEBHOOK_DEAD:1"}})
+	e.waitSettled(t, "rex", own)
+	if n := len(readRecords(t, dir)); n != 1 {
+		t.Errorf("own replay: handler ran %d times", n)
+	}
+}
+
+// TestRetryAfterOnLastAttempt: a retryable answer on the last attempt dead-letters whatever Retry-After says.
+func TestRetryAfterOnLastAttempt(t *testing.T) {
+	r := &Relay{cfg: &Config{MaxAttempts: 1, Backoff: []time.Duration{time.Second}}}
+	m := &message{meta: &jetstream.MsgMetadata{NumDelivered: 1}}
+	p := r.handlerPlan(context.Background(), m, result{verdict: verdictRetry, detail: "status 503", after: time.Minute}, nil)
+	if p.action != actDeadLetter || p.reason != contract.DeadMaxAttempts || p.after != 0 {
+		t.Errorf("plan %+v", p)
+	}
+	r.cfg.MaxAttempts = 2
+	if p := r.handlerPlan(context.Background(), m, result{verdict: verdictRetry, after: time.Minute}, nil); p.action != actRetry || p.after != time.Minute {
+		t.Errorf("plan %+v", p)
 	}
 }
