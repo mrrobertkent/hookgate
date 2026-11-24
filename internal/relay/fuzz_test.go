@@ -76,6 +76,9 @@ func FuzzReplayIsolation(f *testing.F) {
 	f.Add("webhooks.events.resend", "webhooks", "rex")
 	f.Add("webhooks.replay.*", "custom", "b")
 	f.Add("*.events.x", "a.b", "c")
+	f.Add("webhooks.events.*", "webhooks", "rex")
+	f.Add("webhooks.*.*", "custom", "rex")
+	f.Add("a.*.>", "a.b.c", "d")
 	f.Fuzz(func(t *testing.T, filter, prefix, consumer string) {
 		subject := prefix + "." + replayToken + "." + consumer
 		if validateFilter(filter) != nil || contract.ValidateSubject(subject) != nil || !validName(consumer) ||

@@ -91,7 +91,7 @@ func TestRetryThenAck(t *testing.T) {
 func TestDeadLetterContent(t *testing.T) {
 	e := newEnv(t)
 	e.consumer(t, "rex")
-	r := start(t, e.config(t, "rex", helperHandler(t, "stderr", "3", "unsupported event")), true)
+	r := start(t, e.config(t, "rex", helperHandler(t, "stderr", "65", "unsupported event")), true)
 	body := []byte(`{"type":"email.bounced","data":{"id":"x"}}`)
 	seq := e.publish(t, pub{body: body, eventID: "msg_dead", extra: map[string]string{"svix-id": "msg_dead"}})
 	recs := e.waitDead(t, 1)
@@ -107,7 +107,7 @@ func TestDeadLetterContent(t *testing.T) {
 		contract.HeaderContract: "1", contract.HeaderSource: "resend", contract.HeaderEventID: "msg_dead",
 		contract.HeaderEventIDAuthenticated: "true", contract.HeaderSignedAt: "2026-11-23T10:00:00Z",
 		contract.HeaderReceivedAt: "2026-11-23T10:00:00.123Z", contract.HeaderBodySize: "42",
-		contract.HeaderDeadReason: contract.DeadHandlerRejected, contract.HeaderDeadDetail: "exit status 3",
+		contract.HeaderDeadReason: contract.DeadHandlerRejected, contract.HeaderDeadDetail: "exit status 65",
 		contract.HeaderDeadAttempts: "1", contract.HeaderOriginalSubject: eventSubj, contract.HeaderOriginalStream: eventStream,
 		contract.HeaderOriginalConsumer: "rex", contract.HeaderOriginalMsgID: "resend:msg_dead",
 		"content-type": "application/json", "webhook-id": "msg_dead", "svix-id": "msg_dead", "x-not-passed": "kept for dead letters",
@@ -139,7 +139,7 @@ func TestDeadLetterPublishFailureKeepsEvent(t *testing.T) {
 	e := newEnv(t)
 	dl := e.fillDeadStream(t)
 	e.consumer(t, "rex")
-	cfg := e.config(t, "rex", helperHandler(t, "exit", "1"))
+	cfg := e.config(t, "rex", helperHandler(t, "exit", "65"))
 	r := start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("{}")})
 	testutil.Eventually(t, 10*time.Second, func() bool {
@@ -450,7 +450,7 @@ func TestReadinessDeadLetterRetention(t *testing.T) {
 		t.Fatal(err)
 	}
 	testutil.CreateStream(t, e.js, jetstream.StreamConfig{Name: deadStream, Subjects: []string{"webhooks.dead.>"}, Retention: jetstream.InterestPolicy})
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "1")), false)
+	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		err := r.notReady()
 		return err != nil && strings.Contains(err.Error(), "want limits")
@@ -582,7 +582,7 @@ func TestReadinessDeadLetterNoAck(t *testing.T) {
 	if _, err := e.js.UpdateStream(ctx, jetstream.StreamConfig{Name: deadStream, Subjects: []string{"webhooks.dead.>"}, AllowDirect: true, NoAck: true, Discard: jetstream.DiscardNew}); err != nil {
 		t.Fatal(err)
 	}
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "1")), false)
+	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		err := r.notReady()
 		return err != nil && strings.Contains(err.Error(), "no_ack")
@@ -747,7 +747,7 @@ func TestReadinessDeadLetterLimits(t *testing.T) {
 			if _, err := e.js.UpdateStream(ctx, cfg); err != nil {
 				t.Fatal(err)
 			}
-			r := start(t, e.config(t, "rex", helperHandler(t, "exit", "1")), false)
+			r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), false)
 			testutil.Eventually(t, 10*time.Second, func() bool {
 				err := r.notReady()
 				return err != nil && strings.Contains(err.Error(), tc.want)
@@ -767,7 +767,7 @@ func TestDeadLetterTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.consumer(t, "rex")
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "1")), true)
+	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), true)
 	seq := e.publish(t, pub{body: []byte(strings.Repeat("x", 10000)), claim: true})
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		return metric(r.Relay, "hookgate_relay_dead_letter_too_large_total") >= 1
@@ -782,7 +782,7 @@ func TestDeadLetterTooLarge(t *testing.T) {
 func TestDeadLetterDropsOversizedHeaders(t *testing.T) {
 	e := newEnv(t)
 	e.consumer(t, "rex")
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "1")), true)
+	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), true)
 	extra := map[string]string{}
 	for i := range 7 {
 		extra["x-big-"+itoa(uint64(i))] = strings.Repeat("v", 9150)

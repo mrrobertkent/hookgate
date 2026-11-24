@@ -23,6 +23,7 @@ go test -run='^$' -fuzz=FuzzEventID -fuzztime=30s ./internal/contract
 go test -run='^$' -fuzz=FuzzMessageHeaders -fuzztime=30s ./internal/relay
 go test -run='^$' -fuzz=FuzzFilterSubject -fuzztime=30s ./internal/relay
 go test -run='^$' -fuzz=FuzzReplayIsolation -fuzztime=30s ./internal/relay
+go test -run='^$' -fuzz=FuzzRetryAfter -fuzztime=30s ./internal/relay
 go vet ./...
 gofmt -l .
 golangci-lint run   # version pinned in .github/workflows/ci.yml

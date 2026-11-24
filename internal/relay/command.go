@@ -22,14 +22,12 @@ const stderrTail = 4 << 10
 // waitDelay bounds how long a finished or killed handler's output pipes are read after it exits.
 const waitDelay = 5 * time.Second
 
-// Exit codes from sysexits.h that report a transient environment fault rather than a bad event.
+// Exit codes with a meaning of their own; every other non-zero exit retries.
 const (
-	exitUnavailable = 69 // EX_UNAVAILABLE
-	exitOSErr       = 71 // EX_OSERR
-	exitIOErr       = 74 // EX_IOERR
-	exitTempFail    = 75 // EX_TEMPFAIL
-	exitCannotExec  = 126
-	exitNotFound    = 127
+	exitDataErr    = 65 // EX_DATAERR: the handler rejects the event
+	exitConfig     = 78 // EX_CONFIG: the handler is misconfigured
+	exitCannotExec = 126
+	exitNotFound   = 127
 )
 
 // commandDeliverer runs the configured program once per event.
@@ -39,7 +37,7 @@ type commandDeliverer struct {
 	log *slog.Logger
 }
 
-// newCommandDeliverer resolves set_env secrets once, at start.
+// newCommandDeliverer resolves set_env secrets once, at start, and checks that they and the arguments fit an execve.
 func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDeliverer, error) {
 	var env []string
 	for _, name := range cfg.EnvAllow {
@@ -61,6 +59,9 @@ func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDelivere
 		if v != "" || !ref.Optional {
 			env = append(env, name+"="+v)
 		}
+	}
+	if err := checkExecSize(cfg.Path, cfg.Args, env, currentExecLimits()); err != nil {
+		return nil, err
 	}
 	return &commandDeliverer{cfg: cfg, env: env, log: log}, nil
 }
@@ -141,16 +142,18 @@ func (c *commandDeliverer) classify(ctx, runCtx context.Context, cmd *exec.Cmd, 
 	return exitResult(ee.ExitCode())
 }
 
-// exitResult maps an exit status. The detail never carries handler output, which may hold secrets or body data.
+// exitResult maps an exit status. An unknown failure retries: runtimes exit 1 or 2 on an unhandled error, which is
+// as likely transient as not, so only an explicit 65 rejects. The detail never carries handler output, which may
+// hold secrets or body data.
 func exitResult(code int) result {
 	detail := "exit status " + strconv.Itoa(code)
 	switch code {
-	case exitUnavailable, exitOSErr, exitIOErr, exitTempFail:
-		return result{verdict: verdictRetry, detail: detail}
-	case exitCannotExec, exitNotFound:
+	case exitDataErr:
+		return result{verdict: verdictReject, detail: detail}
+	case exitConfig, exitCannotExec, exitNotFound:
 		return result{verdict: verdictPause, detail: detail}
 	}
-	return result{verdict: verdictReject, detail: detail}
+	return result{verdict: verdictRetry, detail: detail}
 }
 
 // startResult maps a start error: a transient resource shortage retries, an environment too large for this event

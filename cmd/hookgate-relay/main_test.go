@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -63,6 +64,12 @@ func TestValidate(t *testing.T) {
 	missing := writeConfig(t, "/nonexistent/handler")
 	if code, _, errOut := runCmd("validate", "-config", missing); code != 1 || !strings.Contains(errOut, "handler.command.path") {
 		t.Errorf("missing handler %d %q", code, errOut)
+	}
+	if runtime.GOOS == "linux" {
+		t.Setenv("RELAY_MAIN_TEST_TOKEN", strings.Repeat("x", 4<<20))
+		if code, _, errOut := runCmd("validate", "-config", file); code != 1 || !strings.Contains(errOut, "environment variable TOKEN") {
+			t.Errorf("oversized secret %d %q", code, errOut)
+		}
 	}
 }
 

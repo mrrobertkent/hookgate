@@ -7,11 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/mrrobertkent/hookgate/internal/contract"
 )
@@ -57,17 +59,35 @@ func (d *httpDeliverer) deliver(ctx context.Context, ev *event) result {
 		return d.transportResult(ctx, rctx, "request", err)
 	}
 	defer resp.Body.Close()
-	switch {
-	case resp.StatusCode == http.StatusSwitchingProtocols:
-		return result{verdict: verdictPause, detail: "status 101 (the handler must answer the request, not upgrade it)"}
-	case resp.StatusCode >= 300 && resp.StatusCode < 400:
-		return resultf(verdictPause, "status %d (redirects are not followed; fix handler.http.url)", resp.StatusCode)
+	if res, fault := configFault(resp.StatusCode); fault {
+		return res
 	}
 	// The response body is read within the request context, so a stalled handler cannot outlast the timeout.
 	if _, err := io.Copy(io.Discard, io.LimitReader(resp.Body, responseDrain)); err != nil {
 		return d.transportResult(ctx, rctx, fmt.Sprintf("status %d, response body", resp.StatusCode), err)
 	}
-	return statusResult(resp.StatusCode)
+	res := statusResult(resp.StatusCode)
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+		if after := retryAfter(resp.Header, time.Now()); after > 0 {
+			res.after = after
+			res.detail += ", Retry-After " + after.String()
+		}
+	}
+	return res
+}
+
+// configFault reports the statuses that mean the handler cannot accept any event: an upgrade, a redirect, or a
+// refused credential.
+func configFault(code int) (result, bool) {
+	switch {
+	case code == http.StatusSwitchingProtocols:
+		return result{verdict: verdictPause, detail: "status 101 (the handler must answer the request, not upgrade it)"}, true
+	case code >= 300 && code < 400:
+		return resultf(verdictPause, "status %d (redirects are not followed; fix handler.http.url)", code), true
+	case code == http.StatusUnauthorized || code == http.StatusForbidden:
+		return resultf(verdictPause, "status %d (the handler refuses the relay's credentials; fix handler.http.set_headers)", code), true
+	}
+	return result{}, false
 }
 
 // setHeaders adds the event's headers, the attempt and set_headers; a configured header replaces a passed one of
@@ -129,15 +149,41 @@ func errorClass(err error) string {
 	return "malformed response"
 }
 
+// statusResult maps a final status. Only statuses that say the request itself is unacceptable reject the event;
+// any other failure, including an unknown 4xx, retries.
 func statusResult(code int) result {
 	detail := "status " + strconv.Itoa(code)
 	switch {
 	case code >= 200 && code < 300:
 		return result{verdict: verdictAck}
-	case code == http.StatusTooManyRequests || code >= 500:
-		return result{verdict: verdictRetry, detail: detail}
-	case code >= 400:
+	case code == http.StatusBadRequest, code == http.StatusRequestEntityTooLarge,
+		code == http.StatusUnsupportedMediaType, code == http.StatusUnprocessableEntity:
 		return result{verdict: verdictReject, detail: detail}
 	}
 	return result{verdict: verdictRetry, detail: detail}
+}
+
+// maxRetryAfter bounds a parsed Retry-After before it becomes a Duration.
+const maxRetryAfter = math.MaxInt64 / int64(time.Second)
+
+// retryAfter returns the delay a Retry-After header asks for (RFC 9110, section 10.2.3: delay-seconds or an
+// HTTP-date), or 0 when the header is absent, repeated, malformed or in the past.
+func retryAfter(h http.Header, now time.Time) time.Duration {
+	v := h.Values("Retry-After")
+	if len(v) != 1 {
+		return 0
+	}
+	s := strings.TrimSpace(v[0])
+	if s != "" && strings.Trim(s, "0123456789") == "" {
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n > maxRetryAfter {
+			n = maxRetryAfter // only an overflow fails on digits
+		}
+		return time.Duration(n) * time.Second
+	}
+	t, err := http.ParseTime(s)
+	if err != nil {
+		return 0
+	}
+	return max(t.Sub(now), 0)
 }
