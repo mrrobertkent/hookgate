@@ -225,6 +225,9 @@ func TestCheckExecSize(t *testing.T) {
 	if err := checkExecSize("/x", nil, nil, execLimits{known: true, maxString: 4096}); err == nil {
 		t.Error("a stack too small for anything accepted")
 	}
+	if err := checkExecSize("/x", nil, nil, execLimits{known: true, maxString: 1024, total: 1 << 20, subject: 1024}); err == nil || !strings.Contains(err.Error(), "HOOKGATE_SUBJECT") {
+		t.Errorf("subject longer than one string may be: %v", err)
+	}
 	long := execLimits{known: true, maxString: 1 << 17, total: lim.total, subject: 4096}
 	if err := checkExecSize("/usr/local/bin/handler", nil, nil, long); err == nil || long.reserve() != lim.reserve()+4096 {
 		t.Errorf("a long subject leaves room: %v", err)

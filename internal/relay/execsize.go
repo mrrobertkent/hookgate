@@ -95,6 +95,9 @@ func checkExecSize(path string, args, env []string, lim execLimits) error {
 		}
 		size += n + pointerSize
 	}
+	if subject := len("HOOKGATE_SUBJECT=") + lim.subject + 1; lim.known && subject > lim.maxString {
+		return fmt.Errorf("filter_subjects or replay_subject: a subject of %d bytes does not fit HOOKGATE_SUBJECT, above the %d-byte limit for one environment string", lim.subject, lim.maxString-1)
+	}
 	if lim.known && size+lim.reserve() > lim.total {
 		return fmt.Errorf("handler.command: arguments and environment take %d bytes; with up to %d bytes of HOOKGATE_ variables per event they exceed the %d-byte limit of one execve (a quarter of the stack size limit)",
 			size, lim.reserve(), lim.total)
