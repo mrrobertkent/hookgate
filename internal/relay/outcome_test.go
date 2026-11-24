@@ -424,6 +424,11 @@ func TestReplayOnlyOnOwnSubject(t *testing.T) {
 	if n := len(readRecords(t, dir)); n != 0 {
 		t.Errorf("handler ran %d times", n)
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := NewReplayer(e.config(t, "rex", helperHandler(t, "exit", "0")), e.js).Replay(ctx, recs[0].Sequence); err == nil {
+		t.Error("the refused replay was replayed")
+	}
 	own := e.publish(t, pub{body: []byte("{}"), subject: "webhooks.replay.rex", extra: map[string]string{contract.HeaderReplay: "WEBHOOK_DEAD:1"}})
 	e.waitSettled(t, "rex", own)
 	if n := len(readRecords(t, dir)); n != 1 {
@@ -476,5 +481,18 @@ func TestReplayMarkerAnyValue(t *testing.T) {
 	}
 	if r.checkReplay(eventSubj, nats.Header{}) != nil {
 		t.Error("plain event refused")
+	}
+}
+
+// TestRetryAfterDateMeasuredAfterBody: an HTTP-date that passes while the response body is read sets no delay.
+func TestRetryAfterDateMeasuredAfterBody(t *testing.T) {
+	res, _ := httpDeliver(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", time.Now().Add(time.Second).UTC().Format(http.TimeFormat))
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.(http.Flusher).Flush()
+		time.Sleep(2500 * time.Millisecond)
+	}, 5*time.Second)
+	if res.verdict != verdictRetry || res.after != 0 {
+		t.Errorf("%s after %s (%s)", res.verdict, res.after, res.detail)
 	}
 }

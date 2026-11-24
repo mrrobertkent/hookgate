@@ -85,8 +85,13 @@ func (rp *Replayer) Replay(ctx context.Context, seq uint64) (Replayed, error) {
 // replayMsg rebuilds the event from a record: contract and application headers only, plus the replay marker.
 func (rp *Replayer) replayMsg(rec *jetstream.RawStreamMsg) (*nats.Msg, string, error) {
 	h := rec.Header
-	if h.Get(contract.HeaderDeadReason) == "" {
+	switch h.Get(contract.HeaderDeadReason) {
+	case "":
 		return nil, "", errors.New("not a dead-letter record")
+	case contract.DeadInvalidMessage:
+		// Replaying cannot repair a malformed event, and a replay received outside its consumer's replay subject
+		// must not be handed to the consumer that refused it.
+		return nil, "", fmt.Errorf("an %s record is not replayed", contract.DeadInvalidMessage)
 	}
 	consumer, stream := h.Get(contract.HeaderOriginalConsumer), h.Get(contract.HeaderOriginalStream)
 	if !validName(consumer) || !validName(stream) {
