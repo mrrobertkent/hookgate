@@ -18,6 +18,6 @@ require (
 	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/klauspost/compress v1.20.4 // indirect
 	github.com/minio/highwayhash v1.0.4 // indirect
-	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/crypto v0.59.0 // indirect
 	golang.org/x/time v0.16.0 // indirect
 )
