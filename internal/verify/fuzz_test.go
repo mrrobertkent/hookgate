@@ -86,19 +86,26 @@ func FuzzStandardWebhooks(f *testing.F) {
 			}
 			return
 		}
-		sec, perr := strconv.ParseInt(ts, 10, 64)
-		when := time.Unix(sec, 0)
-		if perr != nil || !timestampPattern.MatchString(ts) || when.Sub(refTime).Abs() > 5*time.Minute {
-			t.Fatalf("accepted timestamp %q", ts)
-		}
-		want := refSign(t, refSecret, id, when, string(body))
-		if !slices.Contains(strings.Split(sig, " "), want) || res.EventID != id || !res.SignedAt.Equal(when) {
-			t.Fatalf("accepted forged request: id %q, timestamp %q, signature %q, body %q", id, ts, sig, body)
-		}
-		if !eventIDPattern.MatchString(id) {
-			t.Fatalf("accepted event id %q", id)
-		}
+		checkFuzzAccepted(t, res, body, id, ts, sig)
 	})
+}
+
+// checkFuzzAccepted checks that an accepted request has a canonical timestamp inside the tolerance, the reference
+// signature among its entries and a valid event id, and that the result reports them.
+func checkFuzzAccepted(t *testing.T, res Result, body []byte, id, ts, sig string) {
+	t.Helper()
+	sec, perr := strconv.ParseInt(ts, 10, 64)
+	when := time.Unix(sec, 0)
+	if perr != nil || !timestampPattern.MatchString(ts) || when.Sub(refTime).Abs() > 5*time.Minute {
+		t.Fatalf("accepted timestamp %q", ts)
+	}
+	want := refSign(t, refSecret, id, when, string(body))
+	if !slices.Contains(strings.Split(sig, " "), want) || res.EventID != id || !res.SignedAt.Equal(when) {
+		t.Fatalf("accepted forged request: id %q, timestamp %q, signature %q, body %q", id, ts, sig, body)
+	}
+	if !eventIDPattern.MatchString(id) {
+		t.Fatalf("accepted event id %q", id)
+	}
 }
 
 // FuzzStandardWebhooksSecret checks that a secret is accepted exactly when the reference library accepts it and
