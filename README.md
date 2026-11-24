@@ -8,7 +8,7 @@
 
 hookgate is a lightweight webhook gateway: a single static binary that checks each incoming webhook against its sender's signature or token and delivers only authentic requests, byte for byte, to your OpenTelemetry Collector, ClickHouse, Vector or any HTTP backend, or into a replicated NATS JetStream stream.
 
-[Configuration](docs/configuration.md) · [Event contract](docs/contract.md) · [Relay](docs/relay.md) · [Releases](https://github.com/mrrobertkent/hookgate/releases) · [Example](examples/hookgate.yaml) · [Security](SECURITY.md)
+[Configuration](docs/configuration.md) · [Event contract](docs/contract.md) · [Relay](docs/relay.md) · [High availability](docs/high-availability.md) · [Releases](https://github.com/mrrobertkent/hookgate/releases) · [Example](examples/hookgate.yaml) · [Security](SECURITY.md)
 
 [![CI](https://github.com/mrrobertkent/hookgate/actions/workflows/ci.yml/badge.svg)](https://github.com/mrrobertkent/hookgate/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/mrrobertkent/hookgate)](https://github.com/mrrobertkent/hookgate/releases/latest)
@@ -327,11 +327,15 @@ A runnable three-node cluster with the gateway: [examples/jetstream](examples/je
 
 ## Operations
 
-- **Health:** `GET /healthz` on the admin port (process up), `GET /readyz` (`503` while draining). The image's `HEALTHCHECK` runs `hookgate healthcheck`.
+- **Health:** `GET /healthz` on the admin port (process up), `GET /readyz` (`503` while draining, and optionally while an output connection is lost: [readiness](docs/configuration.md#readiness)). The image's `HEALTHCHECK` runs `hookgate healthcheck`.
 - **Graceful rollout:** on SIGTERM hookgate keeps serving for `drain_delay`, then gives in-flight requests `shutdown_timeout`, then drains its NATS connections. Set your orchestrator's stop grace period above their sum.
 - **Limits:** per-source body cap, server read and idle timeouts, `max_concurrent` in-flight requests (`503` beyond it).
-- **Metrics:** `GET /metrics` exposes request outcomes, upstream and publish attempts, publish latency, claim-check stores, NATS connection state, source readiness, in-flight requests and draining ([list](docs/configuration.md#metrics)). Alert on `hookgate_source_ready == 0`, `hookgate_nats_connected == 0` and on `outcome=~"upstream_error|output_error"`.
+- **Metrics:** `GET /metrics` exposes request outcomes, upstream and publish attempts, publish latency, claim-check stores, NATS connection state, source readiness, in-flight requests, draining and instance readiness ([list](docs/configuration.md#metrics)). Alert on `hookgate_source_ready == 0`, `hookgate_nats_connected == 0`, `hookgate_nats_credentials_rejected == 1` and on `outcome=~"upstream_error|output_error"`.
 - **Logs:** one JSON line per request with source, outcome, status, reason and timing. Secrets, signatures and bodies are never logged.
+
+## High availability
+
+hookgate runs as a single instance or as several. Instances are stateless and active-active, with no leader and no shared state: put them behind any load balancer or reverse proxy that health-checks `/readyz` on each instance. On Docker Swarm, a `global` service places one instance on every node; it does not balance traffic, and Swarm's virtual IP never polls `/readyz`, so a proxy that routes to each task (such as Traefik) goes in front. The [high-availability guide](docs/high-availability.md) covers topologies, drain settings, per-instance metrics, secret rotation across instances, where duplicates are absorbed, and running several relays on one consumer.
 
 ## Security
 

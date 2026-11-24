@@ -7,7 +7,7 @@ hookgate reads one YAML file: `-config FILE`, else `$HOOKGATE_CONFIG`, else `/et
 | Key | Default | Meaning |
 |---|---|---|
 | `listen` | `:8080` | Webhook listener. |
-| `admin_listen` | `:9090` | `/healthz`, `/readyz`, `/metrics`. Keep it off the public network. |
+| `admin_listen` | `:9090` | `/healthz`, `/readyz` ([Readiness](#readiness)), `/metrics`. Keep it off the public network. |
 | `max_concurrent` | `64` | Requests verified or delivered at once; extra requests get `503`. |
 | `read_header_timeout` | `5s` | Time allowed for request headers. |
 | `read_timeout` | `15s` | Time allowed for the whole request, body included. |
@@ -17,6 +17,23 @@ hookgate reads one YAML file: `-config FILE`, else `$HOOKGATE_CONFIG`, else `/et
 | `shutdown_timeout` | `30s` | Time in-flight requests get to finish after the drain; NATS connections are then drained within what is left of it. |
 
 Every timeout must be greater than zero; `drain_delay` may be `0s` but not negative.
+
+## Readiness
+
+`GET /readyz` on the admin port is what a load balancer polls to decide whether an instance gets traffic. It answers `503` while draining. `readiness` adds an opt-in condition:
+
+```yaml
+readiness:
+  require_output_connections: true
+  disconnect_grace: 5s
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `readiness.require_output_connections` | `false` | `true`: `/readyz` answers `503` while any connection a source's output uses has been disconnected for longer than `disconnect_grace`, so a balancer routes around the instance until it reconnects. |
+| `readiness.disconnect_grace` | `5s` | How long a connection may be down, from the moment it is first seen down, before it fails readiness; a reconnect within it leaves `/readyz` at `200`. `0s` fails it at once. Must be `>= 0`. Keep `nats.connect_timeout` well below it ([sizing](high-availability.md#nats-connections)). |
+
+Only conditions local to one instance fail readiness. A configuration fault never does, because every instance loads the same configuration and would leave the balancer without a target: a missing or malformed secret, a connection whose credentials cannot be loaded or are rejected (`hookgate_nats_credentials_rejected`), or a JetStream destination that fails its [checks](#outputjetstream) (stream or bucket missing or too small) makes only its own source answer `503`, and the other sources keep serving. When to turn the option on: [High availability](high-availability.md#readiness).
 
 ## Sources
 
@@ -144,7 +161,7 @@ connections:
 | Key | Default | Meaning |
 |---|---|---|
 | name (map key) | required | Referenced by `output.jetstream.connection`. Same rule as source names. |
-| `nats.urls` | required | Server URLs: `nats://`, `tls://`, `ws://` or `wss://`, without credentials in the URL. |
+| `nats.urls` | required | Server URLs: `nats://`, `tls://`, `ws://` or `wss://`, without credentials in the URL. All of them must belong to one NATS cluster: the client moves between them, and streams and claim-check buckets must be the same ones whichever member it reaches, as JetStream serves them from any member of their cluster. |
 | `nats.nkey_seed` | — | Secret reference to a user NKey seed. The public key is fixed when hookgate starts, so switching to a new seed needs a restart. |
 | `nats.creds` | — | Secret reference to a creds file (user JWT and seed), for servers in operator mode. A file is read again at every reconnect, so a replaced file takes effect on the next reconnect. |
 | `nats.token` | — | Secret reference to a token. |
@@ -152,9 +169,9 @@ connections:
 | `nats.tls.ca` | system roots | Secret reference to the PEM CA bundle that signs the servers' certificates. |
 | `nats.tls.cert`, `nats.tls.key` | — | Secret references to a PEM client certificate and key, set together. TLS 1.2 is the minimum. |
 | `nats.inbox_prefix` | `_INBOX.<name>` | Prefix of the reply subjects; the identity needs subscribe permission on `<prefix>.>` only. Dot-separated tokens without whitespace or wildcards. |
-| `nats.connect_timeout` | `5s` | Limit for one connection attempt. |
+| `nats.connect_timeout` | `5s` | Limit for one connection attempt. The client holds its lock during an attempt, so a publish that starts while the client is in a reconnect handshake can wait up to this long before it fails or proceeds. |
 
-Authentication secrets may not be `optional`. An unset or unusable one makes every source using the connection not ready, like a missing check secret. An unreachable server is not an error: the client retries forever (with jitter), and the sources answer `503` until it connects. Publishing never waits for a reconnect behind the scenes; it fails at once and the output retries within its `timeout`.
+Authentication secrets may not be `optional`. An unset or unusable one makes every source using the connection not ready, like a missing check secret. An unreachable server is not an error: the client retries forever (with jitter), and the sources answer `503` until it connects. Rejected credentials are retried too: the server refusing the authentication (authorization violation, expired or revoked authentication) or the client certificate, the server's certificate failing verification against `tls.ca`, or a seed or creds file that cannot be read or parsed when the client signs in again. Once seen, a rejection lasts until the connection succeeds. Meanwhile the sources answer `503`, the rejection is logged and `hookgate_nats_credentials_rejected` is `1`. Publishing never waits for a reconnect behind the scenes; it fails at once and the output retries within its `timeout`.
 
 ## `output.http`
 
@@ -212,7 +229,7 @@ output:
 
 **Checks.** On every connect and reconnect, every 5 s while one fails and every 30 s while all pass, the source checks its destination. While a check fails the source answers `503`, logs the reason and reports `hookgate_source_ready 0`:
 
-- the stream exists, acknowledges publishes (`no_ack` false), uses `limits` retention (with `interest` or `workqueue` retention a stream can acknowledge an event without storing it) and `discard: new` (with `discard: old` a full stream evicts acknowledged events);
+- the stream exists, stores the source's subject (one of its subjects, wildcards included, matches it), acknowledges publishes (`no_ack` false), uses `limits` retention (with `interest` or `workqueue` retention a stream can acknowledge an event without storing it) and `discard: new` (with `discard: old` a full stream evicts acknowledged events);
 - `inline_max_bytes` + `max_header_bytes` fits the smaller of the server's `max_payload` and the stream's `max_msg_size`;
 - with a claim check, the bucket's stream exists and:
   - acknowledges publishes, uses `limits` retention, `discard: new`, no `max_msgs_per_subject` limit (every chunk of an object shares one subject) and direct get (`allow_direct`, the default for buckets);
@@ -223,7 +240,7 @@ output:
 
 A stream on memory storage or with one replica passes, with a warning in the log: an acknowledgement then does not survive the loss of a server. See [pairing a stream](contract.md#pairing-a-stream).
 
-A disconnect invalidates the last check, and so does any reconnect, counted by the client: while the connection is down, and after a reconnect until the checks pass on the new connection, the source answers `503` and reports `hookgate_source_ready 0`. Readiness is checked again after the body is read, before delivery.
+A disconnect invalidates the last check, and so does any reconnect, counted by the client: while the connection is down, and after a reconnect until the checks pass on the new connection, the source answers `503` and reports `hookgate_source_ready 0`. Readiness is checked again after the body is read, before delivery. Every publish attempt runs on a connection the checks passed on: when the client has reconnected since the last check, the checks run on the new connection before the publish (a failure answers `503`), and an acknowledgement that arrives after the client changed connections is not trusted, so the attempt is retried. A disconnect or failed connection attempt marks the connection down at once, and its status is sampled every 250 ms and after every connection event; admitting a request and answering `/readyz` read only that recorded status, so neither waits on a reconnect in progress.
 
 **Shutdown.** On SIGTERM, requests already admitted finish their publish; the NATS connections are drained only after the HTTP server has shut down, within what is left of `shutdown_timeout`.
 
@@ -239,7 +256,9 @@ A disconnect invalidates the last check, and so does any reconnect, counted by t
 | `hookgate_publish_duration_seconds` | histogram | `source`; one observation per publish attempt |
 | `hookgate_claim_check_puts_total` | counter | `source`, `result` = `ok`, `error` |
 | `hookgate_nats_connected` | gauge | `connection` |
+| `hookgate_nats_credentials_rejected` | gauge | `connection`; `1` while the connection is down because its credentials or certificates are rejected |
 | `hookgate_source_ready` | gauge | `source` |
+| `hookgate_ready` | gauge | —; `1` while `/readyz` answers `200` |
 | `hookgate_in_flight_requests` | gauge | — |
 | `hookgate_draining` | gauge | — |
 

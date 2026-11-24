@@ -13,6 +13,7 @@ type gatewayMetrics struct {
 	attempts  *metrics.Counter
 	ready     *metrics.Gauge
 	connected *metrics.Gauge
+	rejected  *metrics.Gauge
 	outputs   *output.Metrics
 	inFlight  atomic.Int64
 	draining  atomic.Bool
@@ -30,6 +31,7 @@ func newMetrics() *gatewayMetrics {
 		ClaimPuts:        m.reg.Counter("hookgate_claim_check_puts_total", "Claim-check body stores by source and result.", "source", "result"),
 	}
 	m.connected = m.reg.Gauge("hookgate_nats_connected", "1 while the named NATS connection is connected, else 0.", "connection")
+	m.rejected = m.reg.Gauge("hookgate_nats_credentials_rejected", "1 while the named NATS connection is down because its credentials or certificates are rejected, else 0.", "connection")
 	m.reg.GaugeFunc("hookgate_in_flight_requests", "Requests being processed.", func() float64 { return float64(m.inFlight.Load()) })
 	m.reg.GaugeFunc("hookgate_draining", "1 after a shutdown signal, while in-flight requests finish.", func() float64 {
 		if m.draining.Load() {

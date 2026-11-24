@@ -10,7 +10,8 @@ import (
 )
 
 // Proxy forwards TCP connections to a target. It can hold back what the target sends, to keep replies pending
-// or make them arrive after the client stopped waiting, and report what the client sent.
+// or make them arrive after the client stopped waiting, report what the client sent, and refuse connections to
+// cut a client off from a target that keeps running.
 type Proxy struct {
 	ln     net.Listener
 	target string
@@ -19,6 +20,7 @@ type Proxy struct {
 
 	mu      sync.Mutex
 	conns   []net.Conn
+	down    bool
 	hold    []byte // the next target read containing it is held back by holdFor
 	holdFor time.Duration
 	watches []watch
@@ -66,6 +68,16 @@ func (p *Proxy) DropConnections() {
 	p.conns = nil
 }
 
+// SetDown drops every connection and closes new ones at once while down is true.
+func (p *Proxy) SetDown(down bool) {
+	p.mu.Lock()
+	p.down = down
+	p.mu.Unlock()
+	if down {
+		p.DropConnections()
+	}
+}
+
 // HoldNext holds back the next read from the target that contains match by d, once.
 func (p *Proxy) HoldNext(match []byte, d time.Duration) {
 	p.mu.Lock()
@@ -94,6 +106,12 @@ func (p *Proxy) accept() {
 			continue
 		}
 		p.mu.Lock()
+		if p.down {
+			p.mu.Unlock()
+			c.Close()
+			u.Close()
+			continue
+		}
 		p.conns = append(p.conns, c, u)
 		p.mu.Unlock()
 		p.wg.Go(func() { p.pipe(u, c, p.observe); u.Close() })

@@ -79,7 +79,11 @@ func Build(src config.Source, d Deps) (Output, error) {
 	case src.Output.HTTP != nil:
 		return newHTTP(src, d)
 	case src.Output.JetStream != nil:
-		return newJetStream(src, d)
+		o, err := newJetStream(src, d)
+		if err != nil {
+			return nil, err // a nil *jetStreamOutput would make a non-nil Output
+		}
+		return o, nil
 	}
 	return nil, errors.New("no output configured")
 }

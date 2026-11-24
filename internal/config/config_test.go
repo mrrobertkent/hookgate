@@ -393,3 +393,27 @@ func TestRedactURL(t *testing.T) {
 		}
 	}
 }
+
+func TestReadiness(t *testing.T) {
+	c, err := Parse([]byte(minimal))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Readiness.RequireOutputConnections || *c.Readiness.DisconnectGrace != 5*time.Second {
+		t.Errorf("readiness defaults: %+v", c.Readiness)
+	}
+	for in, want := range map[string]time.Duration{"0s": 0, "250ms": 250 * time.Millisecond} {
+		c, err := Parse([]byte("readiness: {require_output_connections: true, disconnect_grace: " + in + "}\n" + minimal))
+		if err != nil {
+			t.Fatalf("%s: %v", in, err)
+		}
+		if !c.Readiness.RequireOutputConnections || *c.Readiness.DisconnectGrace != want {
+			t.Errorf("%s: %+v", in, c.Readiness)
+		}
+	}
+	for _, bad := range []string{"readiness: {disconnect_grace: -1s}", "readiness: {disconnect_grace: soon}", "readiness: {grace: 1s}"} {
+		if _, err := Parse([]byte(bad + "\n" + minimal)); err == nil {
+			t.Errorf("%s: accepted", bad)
+		}
+	}
+}
