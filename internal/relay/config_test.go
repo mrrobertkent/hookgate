@@ -60,7 +60,9 @@ func TestConfigErrors(t *testing.T) {
 		{"static replay subject", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: webhooks.replay.rex", "must be <prefix>.replay.{consumer}"},
 		{"custom prefix, default wildcard", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"custom.replay.{consumer}\"", "must list custom.replay.rex"},
 		{"custom prefix catching others", "webhooks.replay.rex]", "custom.replay.rex, webhooks.replay.*]\nreplay_subject: \"custom.replay.{consumer}\"", "could match a replay subject"},
-		{"wildcard event filter", "webhooks.events.resend,", "webhooks.events.*,", "could match a replay subject"},
+		{"wildcard event catch-all", "webhooks.events.resend,", "webhooks.events.>,", "could match a replay subject"},
+		{"custom prefix, other replay literally", "webhooks.replay.rex]", "custom.replay.rex, webhooks.replay.b]\nreplay_subject: \"custom.replay.{consumer}\"", "could match a replay subject"},
+		{"wildcard before the last token", "webhooks.events.resend,", "\"webhooks.*.resend\",", "could match a replay subject"},
 		{"replay token in prefix", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"replay.x.replay.{consumer}\"", "must be <prefix>.replay.{consumer}"},
 		{"replay wildcard", "webhooks.replay.rex]", "webhooks.replay.*]", "could match a replay subject"},
 		{"other consumer's replay", "webhooks.replay.rex]", "webhooks.replay.rex, webhooks.replay.b]", "could match a replay subject"},
@@ -171,13 +173,25 @@ func TestDeadMessageIDsUnambiguous(t *testing.T) {
 
 func TestMayMatchReplay(t *testing.T) {
 	cases := map[string]bool{
-		"webhooks.events.resend": false, "*.events.resend": false, "events": false,
-		"webhooks.replay.b": true, "webhooks.events.*": true, "webhooks.>": true, ">": true, "*.replay.x": true,
-		"custom.replay.rex": true, "a.b.replay": true,
+		"webhooks.events.resend": false, "*.events.resend": false, "events": false, "webhooks.events.*": false,
+		"*.events.*": false, "a.b.replay": false, "webhooks.replay.x.y": false, "replay": false, "*": false,
+		"a.*": false, "replay.a": true, "*.a": true,
+		"webhooks.replay.b": true, "webhooks.>": true, ">": true, "*.replay.x": true, "a.>": true, "a.b.c.>": true,
+		"custom.replay.rex": true, "webhooks.*.*": true, "*.*.*": true, "webhooks.*.resend": true,
 	}
 	for f, want := range cases {
 		if got := mayMatchReplay(f); got != want {
 			t.Errorf("mayMatchReplay(%q) = %v", f, got)
+		}
+	}
+}
+
+// TestWildcardEventFilterAccepted: a wildcard over event subjects cannot match a replay subject and is accepted.
+func TestWildcardEventFilterAccepted(t *testing.T) {
+	for _, f := range []string{"webhooks.events.*", "*.events.*", "webhooks.replay.x.y"} {
+		raw := strings.Replace(minimalConfig, "webhooks.events.resend,", "\""+f+"\",", 1)
+		if _, err := ParseConfig([]byte(raw)); err != nil {
+			t.Errorf("%s: %v", f, err)
 		}
 	}
 }

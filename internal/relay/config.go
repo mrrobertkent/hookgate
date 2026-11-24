@@ -200,13 +200,13 @@ func (c *Config) validateSubjects() []error {
 	return errs
 }
 
-// replayToken is reserved for replay subjects: every relay's replay subject is "<prefix>.replay.<consumer>", and no
-// other filter subject may match a subject with this token after its first position. Replays therefore reach
-// only the consumer named in their subject, whatever prefix any relay uses.
+// replayToken is reserved for replay subjects: every relay's replay subject is "<prefix>.replay.<consumer>", with
+// the token nowhere in the prefix, and no other filter subject may match a subject with this token second to last.
+// Replays therefore reach only the consumer named in their subject, whatever prefix any relay uses.
 const replayToken = "replay"
 
 // validateReplaySubject keeps replays isolated: the template is "<prefix>.replay.{consumer}", this consumer's
-// filters list its own replay subject, and no other filter can match a subject carrying the reserved token.
+// filters list its own replay subject, and no other filter can match any relay's replay subject.
 func (c *Config) validateReplaySubject() []error {
 	if err := contract.ValidateSubjectTemplate(c.ReplaySubject, consumerPlaceholder); err != nil {
 		return []error{fmt.Errorf("replay_subject: %w", err)}
@@ -225,25 +225,24 @@ func (c *Config) validateReplaySubject() []error {
 	}
 	for _, f := range c.FilterSubjects {
 		if f != own && mayMatchReplay(f) {
-			errs = append(errs, fmt.Errorf("filter_subjects: %s could match a replay subject (a %q token, or a wildcard, after the first token); list event subjects literally", f, replayToken))
+			errs = append(errs, fmt.Errorf("filter_subjects: %s could match a replay subject (it contains >, or its second-to-last token is %q or *)", f, replayToken))
 		}
 	}
 	return errs
 }
 
-// mayMatchReplay reports whether a filter can match a subject with the reserved replay token in a position other
-// than the first: a literal replay token there, or a wildcard that can stand for one.
+// mayMatchReplay reports whether a filter can match a subject whose second-to-last token is the reserved replay
+// token: a > matches subjects of any length, and without one a filter matches only subjects of its own length.
 func mayMatchReplay(filter string) bool {
 	toks := strings.Split(filter, ".")
-	if toks[0] == ">" {
+	if slices.Contains(toks, ">") {
 		return true
 	}
-	for _, t := range toks[1:] {
-		if t == replayToken || t == "*" || t == ">" {
-			return true
-		}
+	if len(toks) < 2 {
+		return false
 	}
-	return false
+	t := toks[len(toks)-2]
+	return t == replayToken || t == "*"
 }
 
 func (c *Config) replaySubject() string {
@@ -409,6 +408,13 @@ func matchesAny(filters []string, subject string) bool {
 		}
 	}
 	return false
+}
+
+func (c *Config) handlerTimeout() time.Duration {
+	if c.Handler.Command != nil {
+		return c.Handler.Command.Timeout
+	}
+	return c.Handler.HTTP.Timeout
 }
 
 // handlerTarget names the handler for logs: the program path, or the URL without credentials or query.

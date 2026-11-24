@@ -10,7 +10,7 @@ Every message carries `Hookgate-Contract: 1`. A consumer rejects a message whose
 
 Events are published to `webhooks.events.<source>` (the `subject` template, `webhooks.events.{source}` by default). Source names match `[A-Za-z0-9][A-Za-z0-9_-]{0,62}` and so never contain `:`, `/` or `.`.
 
-The relay publishes replays to `webhooks.replay.<consumer>` and dead-letter records to `webhooks.dead.<consumer>` (its `replay_subject` and `dead_letter.subject` defaults), each consumer's to its own subject. Streams carrying these subjects store them as published: no subject transform and no republishing, which could hand one consumer's replay to another. The token `replay` is reserved: every replay subject is `<prefix>.replay.<consumer>`, and no other subject a consumer filters carries `replay` after its first token.
+The relay publishes replays to `webhooks.replay.<consumer>` and dead-letter records to `webhooks.dead.<consumer>` (its `replay_subject` and `dead_letter.subject` defaults), each consumer's to its own subject. Streams carrying these subjects store them as published: no subject transform (of the stream, its sources or its mirror) and no republishing, which could hand one consumer's replay to another. The token `replay` is reserved: every replay subject is `<prefix>.replay.<consumer>`, with `replay` nowhere in the prefix, and no other subject a consumer filters can match a subject whose second-to-last token is `replay`.
 
 ## Messages
 
@@ -167,12 +167,15 @@ Every variable is always set, empty when it has no value.
 | Exit | Meaning | Relay action |
 |---|---|---|
 | `0` | Processed. | Acknowledge. |
-| `75` (`EX_TEMPFAIL`), `69` (`EX_UNAVAILABLE`), `71` (`EX_OSERR`), `74` (`EX_IOERR`) | Transient fault in the handler's environment. | Retry after the backoff delay. |
-| timeout, killed by a signal (for example the OOM killer) | | Retry after the backoff delay. |
-| `126`, `127`, or the program cannot be started (missing, not executable, not a valid executable) | Configuration fault. | Nak the event and pause the relay until restart. |
-| any other | The event cannot be processed. | Dead-letter as `handler_rejected`. |
+| `65` (`EX_DATAERR`) | The handler rejects the event as invalid. | Dead-letter as `handler_rejected`. |
+| `78` (`EX_CONFIG`), `126`, `127`, or the program cannot be started (missing, not executable, not a valid executable) | Configuration fault. | Nak the event and pause the relay until restart. |
+| any other non-zero exit (`75` `EX_TEMPFAIL` included), timeout, killed by a signal (for example the OOM killer) | Failure that may pass. | Retry after the backoff delay. |
 
-A retry on the last allowed attempt dead-letters the event as `max_attempts`; a rejection's dead-letter detail is the exit status only (`exit status 3`). A start error that is a transient resource shortage (`EAGAIN`, `ENOMEM`, `ETXTBSY`, `EMFILE`, `ENFILE`) retries; an environment too large for the event (`E2BIG`) dead-letters it as `handler_rejected`.
+A retry on the last allowed attempt dead-letters the event as `max_attempts`. For an exit, the dead letter's detail is the exit status only (`exit status 65`); a timeout, a signal or a start error is named instead. A start error that is a transient resource shortage (`EAGAIN`, `ENOMEM`, `ETXTBSY`, `EMFILE`, `ENFILE`) retries.
+
+Only `65` rejects, because an unknown failure is retried: runtimes exit `1` or `2` on an unhandled exception (Python and Node.js `1`, a Go panic `2`), often for a transient cause such as a lost database connection. Treating those exits as rejections would dead-letter transient failures on their first attempt. A handler that knows an event can never succeed exits `65`.
+
+The fixed arguments and environment (`args`, the `env_allow` values present at start and `set_env`) must leave room for the per-event variables: on Linux the relay refuses to start when one of their strings contains a NUL byte or exceeds the kernel's per-string limit (`MAX_ARG_STRLEN`, 128 KiB on 4 KiB pages), or when, together with what interpreters (`#!` scripts, `binfmt_misc`) may add and the room reserved for the `HOOKGATE_` variables (64 KiB of `HOOKGATE_HEADERS` JSON, which JSON escaping can make larger than the headers on the wire, 4 KiB for the other values and the longest configured subject), they could exceed the total limit (a quarter of the stack size limit, at least 128 KiB and at most 6 MiB, never more than the stack size limit itself; 128 KiB when the stack limit cannot be read). An event whose metadata contains a NUL byte, or whose headers still make the start fail as too large (`E2BIG`), cannot be handed to a program and is dead-lettered as `handler_rejected`. An `E2BIG` for an event within the reserved room is not the event's doing (an interpreter or the stack took more room than the check allows for) and pauses the relay as a configuration fault.
 
 stdout is discarded. The last 4 KiB of stderr appear in the relay's log line for a failed run, nowhere else; a handler must not write secrets or body data to stderr.
 
@@ -190,9 +193,12 @@ The relay `POST`s the full body to `handler.http.url` with:
 | Response | Relay action |
 |---|---|
 | `2xx` | Acknowledge. |
-| `429`, `5xx`, timeout, connection or transport error, an error reading the response body | Retry after the backoff delay. The detail names the class only (`timeout`, `connection refused`, `connection reset or closed`, `name resolution failed`, `TLS failure`, `network error`, `malformed response`), never the error text, which can quote what the handler sent. |
-| `101`, `3xx` | Configuration fault (upgrades and redirects are never followed; `Location` is not read): nak the event and pause the relay until restart. |
-| any other `4xx` | Dead-letter as `handler_rejected`, detail `status <code>`. |
+| `400`, `413`, `415`, `422` | The handler rejects the event: dead-letter as `handler_rejected`, detail `status <code>`. |
+| `401`, `403`, `3xx`, `101` | Configuration fault (a refused credential; upgrades and redirects are never followed, `Location` is not read): nak the event and pause the relay until restart. |
+| `404`, `408`, `409`, `425`, `429`, `5xx`, any other `4xx` | Retry after the backoff delay, detail `status <code>` (with `Retry-After` when it sets the delay). |
+| timeout, connection or transport error, an error reading the response body (whatever the status) | Retry after the backoff delay. The detail names the class only (`timeout`, `connection refused`, `connection reset or closed`, `name resolution failed`, `TLS failure`, `network error`, `malformed response`), never the error text, which can quote what the handler sent. |
+
+An unknown status retries, so only a deliberate answer dead-letters an event. On `429` and `503` a single valid `Retry-After` (delay-seconds or an HTTP-date) sets the redelivery delay: the larger of it and the backoff delay, with `Retry-After` capped at the last `backoff` value. A retry on the last allowed attempt dead-letters the event as `max_attempts`, whatever `Retry-After` says.
 
 At most 64 KiB of the response body is read, within `handler.http.timeout`; it is not otherwise used.
 

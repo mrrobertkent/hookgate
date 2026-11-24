@@ -493,3 +493,20 @@ func (e *env) deadID(t *testing.T, consumer string, seq uint64) string {
 	}
 	return "dead:" + eventStream + ":" + strconv.FormatInt(s.CachedInfo().Created.UnixNano(), 10) + ":" + consumer + ":" + strconv.FormatUint(seq, 10)
 }
+
+func (e *env) stream(t *testing.T) jetstream.Stream {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	s, err := e.js.Stream(ctx, eventStream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
+}
+
+// streamState is the number of messages in the event stream.
+func (e *env) streamState(t *testing.T) uint64 {
+	t.Helper()
+	return e.stream(t).CachedInfo().State.Msgs
+}

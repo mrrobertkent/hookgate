@@ -30,7 +30,8 @@ type plan struct {
 	action   action
 	reason   string // dead-letter reason
 	detail   string
-	body     []byte // the resolved body, when resolved
+	after    time.Duration // the handler's requested retry delay
+	body     []byte        // the resolved body, when resolved
 	resolved bool
 }
 
@@ -87,6 +88,9 @@ func (r *Relay) decide(work context.Context, m *message) plan {
 	h := m.msg.Headers()
 	size, sum, f := checkContract(h)
 	if f == nil {
+		f = r.checkReplay(m.msg.Subject(), h)
+	}
+	if f == nil {
 		m.claim, f = claimRef(h, m.msg.Data())
 	}
 	var body []byte
@@ -128,7 +132,11 @@ func (r *Relay) handlerPlan(work context.Context, m *message, res result, body [
 	case verdictAck:
 		return plan{action: actAck}
 	case verdictRetry:
-		return r.retryPlan(m, res.detail, body, true)
+		p := r.retryPlan(m, res.detail, body, true)
+		if p.action == actRetry {
+			p.after = res.after
+		}
+		return p
 	case verdictReject:
 		return plan{action: actDeadLetter, reason: contract.DeadHandlerRejected, detail: res.detail, body: body, resolved: true}
 	case verdictPause:
@@ -162,6 +170,12 @@ func attempt(meta *jetstream.MsgMetadata) int {
 // backoff is the retry delay after delivery attempt n: backoff[n-1], the last value repeating.
 func (r *Relay) backoff(meta *jetstream.MsgMetadata) time.Duration {
 	return r.cfg.Backoff[min(max(attempt(meta), 1)-1, len(r.cfg.Backoff)-1)]
+}
+
+// retryDelay is the backoff delay, or the handler's requested delay when that is longer, capped at the last
+// backoff value.
+func (r *Relay) retryDelay(meta *jetstream.MsgMetadata, after time.Duration) time.Duration {
+	return max(r.backoff(meta), min(after, r.cfg.Backoff[len(r.cfg.Backoff)-1]))
 }
 
 // execute writes the dead letter a plan calls for, while the message is still kept alive, and returns the
@@ -208,7 +222,9 @@ func (r *Relay) settle(m *message, p plan, outcome string) {
 		ctx, cancel := context.WithTimeout(context.Background(), settleTimeout)
 		err = m.msg.DoubleAck(ctx)
 		cancel()
-	case actRetry, actPause:
+	case actRetry:
+		err = m.msg.NakWithDelay(r.retryDelay(m.meta, p.after))
+	case actPause:
 		err = m.msg.NakWithDelay(r.backoff(m.meta))
 	case actShutdown:
 		err = m.msg.NakWithDelay(r.cfg.ShutdownNakDelay)

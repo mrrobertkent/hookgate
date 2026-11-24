@@ -28,11 +28,12 @@ jobs:
         run: go test -run='^$' -fuzz='^FuzzStandardWebhooks$' -fuzztime=60s ./internal/verify
       - name: Fuzz the Standard Webhooks secret decoder
         run: go test -run='^$' -fuzz=FuzzStandardWebhooksSecret -fuzztime=30s ./internal/verify
-      - name: Fuzz relay message headers and filter subjects
+      - name: Fuzz relay message headers, filter subjects and Retry-After
         run: |
           go test -run='^$' -fuzz=FuzzMessageHeaders -fuzztime=30s ./internal/relay
           go test -run='^$' -fuzz=FuzzFilterSubject -fuzztime=30s ./internal/relay
           go test -run='^$' -fuzz=FuzzReplayIsolation -fuzztime=30s ./internal/relay
+          go test -run='^$' -fuzz=FuzzRetryAfter -fuzztime=30s ./internal/relay
       - name: Fuzz subject templates and event IDs
         run: |
           go test -run='^$' -fuzz=FuzzSubjectTemplate -fuzztime=30s ./internal/contract

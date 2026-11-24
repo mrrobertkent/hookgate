@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -37,12 +38,13 @@ const (
 
 // Relay delivers events from one durable consumer to one handler.
 type Relay struct {
-	cfg          *Config
-	log          *slog.Logger
-	m            *relayMetrics
-	handler      deliverer
-	passPatterns []string
-	deadSubject  string
+	cfg           *Config
+	log           *slog.Logger
+	m             *relayMetrics
+	handler       deliverer
+	passPatterns  []string
+	deadSubject   string
+	replaySubject string
 
 	nc     *natsconn.Conn
 	js     jetstream.JetStream
@@ -66,21 +68,22 @@ type Relay struct {
 // New builds a relay, resolving the handler's secrets. It does not connect.
 func New(cfg *Config, log *slog.Logger) (*Relay, error) {
 	r := &Relay{
-		cfg:         cfg,
-		log:         log,
-		m:           newMetrics(),
-		deadSubject: cfg.deadSubject(),
-		checkErr:    errors.New("not checked yet"),
-		ackWait:     defaultAckWait,
-		wake:        make(chan struct{}, 1),
-		recheck:     make(chan struct{}, 1),
+		cfg:           cfg,
+		log:           log,
+		m:             newMetrics(),
+		deadSubject:   cfg.deadSubject(),
+		replaySubject: cfg.replaySubject(),
+		checkErr:      errors.New("not checked yet"),
+		ackWait:       defaultAckWait,
+		wake:          make(chan struct{}, 1),
+		recheck:       make(chan struct{}, 1),
 	}
 	for _, p := range cfg.PassHeaders {
 		r.passPatterns = append(r.passPatterns, strings.ToLower(p))
 	}
 	var err error
 	if cfg.Handler.Command != nil {
-		r.handler, err = newCommandDeliverer(*cfg.Handler.Command, log)
+		r.handler, err = newCommandDeliverer(*cfg.Handler.Command, append(slices.Clone(cfg.FilterSubjects), cfg.replaySubject()), log)
 	} else {
 		r.handler, err = newHTTPDeliverer(*cfg.Handler.HTTP)
 	}

@@ -324,7 +324,7 @@ A runnable three-node cluster with the gateway: [examples/jetstream](examples/je
 
 ## Relay
 
-`hookgate-relay` consumes events that hookgate published to NATS JetStream and delivers each to your application, by running a command or posting to an HTTP endpoint, with retries, a dead-letter stream, replay and graceful drain. It ships as its own binary and image, so the gateway image carries no consumer code. See [docs/relay.md](docs/relay.md) and the [event contract](docs/contract.md).
+`hookgate-relay` consumes events that hookgate published to NATS JetStream and delivers each to your application, by running a command or posting to an HTTP endpoint, with retries, a dead-letter stream, replay and graceful drain. It ships as its own binary and image, so the gateway image carries no consumer code. A handler rejects an event explicitly (exit `65`, or HTTP `400`, `413`, `415` or `422`); a configuration fault (exit `78`, `126` or `127`, a program that cannot be started, HTTP `401`, `403`, `101` or a redirect) pauses the relay; any other failure is retried with backoff and dead-lettered once `max_attempts` is used up. Start failures split three ways: a transient resource shortage retries, an event whose own metadata holds a NUL byte or exceeds the room reserved for it is dead-lettered as `handler_rejected`, and any other start failure pauses. See [docs/relay.md](docs/relay.md) and the [event contract](docs/contract.md#relay-command-handlers).
 
 ## Operations
 

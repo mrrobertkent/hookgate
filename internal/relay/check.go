@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
@@ -100,7 +101,7 @@ func (r *Relay) inspect(ctx context.Context) (jetstream.Consumer, *jetstream.Con
 	if err != nil {
 		return cons, info, fmt.Errorf("dead_letter.stream %s: %w", r.cfg.DeadLetter.Stream, err)
 	}
-	if err := r.checkDeadStream(dl.CachedInfo().Config, st.CachedInfo().Config); err != nil {
+	if err := r.checkDeadStream(dl.CachedInfo().Config, st.CachedInfo().Config, info.Config.AckWait); err != nil {
 		return cons, info, err
 	}
 	if r.claims != nil {
@@ -114,8 +115,9 @@ func (r *Relay) inspect(ctx context.Context) (jetstream.Consumer, *jetstream.Con
 // checkDeadStream requires a stream that captures the dead-letter subject and keeps every record it acknowledges:
 // with interest or work-queue retention it can acknowledge a record no consumer wants and store nothing, and with
 // discard old or a per-subject limit a later record can evict one whose message ID still deduplicates a retry.
-// Its message size limit must be at least the event stream's, since records carry whole bodies.
-func (r *Relay) checkDeadStream(c, events jetstream.StreamConfig) error {
+// Its message size limit must be at least the event stream's, since records carry whole bodies, and it must keep
+// records at least as long as the event stream keeps events.
+func (r *Relay) checkDeadStream(c, events jetstream.StreamConfig, ackWait time.Duration) error {
 	name := r.cfg.DeadLetter.Stream
 	var errs []error
 	if !matchesAny(c.Subjects, r.deadSubject) {
@@ -139,10 +141,27 @@ func (r *Relay) checkDeadStream(c, events jetstream.StreamConfig) error {
 	if c.MaxMsgSize > 0 && (events.MaxMsgSize <= 0 || c.MaxMsgSize < events.MaxMsgSize) {
 		errs = append(errs, fmt.Errorf("max_msg_size %d is below stream %s's (%d, or unlimited)", c.MaxMsgSize, events.Name, events.MaxMsgSize))
 	}
+	if c.MaxAge > 0 && (events.MaxAge <= 0 || c.MaxAge < events.MaxAge) {
+		errs = append(errs, fmt.Errorf("max_age %s is below stream %s's (%s, or unlimited)", c.MaxAge, events.Name, events.MaxAge))
+	}
+	if err := r.checkDuplicateWindow(c.Duplicates, ackWait); err != nil {
+		errs = append(errs, err)
+	}
 	if len(errs) == 0 {
 		return nil
 	}
 	return fmt.Errorf("dead_letter.stream %s: %w", name, errors.Join(errs...))
+}
+
+// checkDuplicateWindow requires the dead-letter stream to deduplicate a record published again after a relay stops
+// between the record's acknowledgement and terminating the event: the event returns after ack_wait and runs the
+// handler once more before the second publish.
+func (r *Relay) checkDuplicateWindow(window, ackWait time.Duration) error {
+	timeout := r.cfg.handlerTimeout()
+	if window < ackWait || window-ackWait < timeout {
+		return fmt.Errorf("duplicate_window %s is below the consumer's ack_wait (%s) plus the handler timeout (%s)", window, ackWait, timeout)
+	}
+	return nil
 }
 
 // checkConsumer requires a durable pull consumer with explicit acks whose terminal decision and retry delays
@@ -246,8 +265,9 @@ func describeAge(maxAge, need time.Duration) string {
 	return need.String()
 }
 
-// checkRouting rejects a stream that rewrites or copies subjects: a subject transform could turn one consumer's
-// replay subject into another's, and republishing duplicates events onto other subjects.
+// checkRouting rejects a stream that rewrites or copies subjects: a subject transform, its own or a source's or
+// mirror's, could turn one consumer's replay subject into another's, and republishing duplicates events onto other
+// subjects.
 func checkRouting(where string, c jetstream.StreamConfig) error {
 	var what string
 	switch {
@@ -255,6 +275,8 @@ func checkRouting(where string, c jetstream.StreamConfig) error {
 		what = "has a subject transform"
 	case c.RePublish != nil:
 		what = "republishes messages"
+	case rewritesSource(c.Mirror) || slices.ContainsFunc(c.Sources, rewritesSource):
+		what = "sources or mirrors messages under rewritten subjects"
 	default:
 		return nil
 	}
@@ -262,4 +284,16 @@ func checkRouting(where string, c jetstream.StreamConfig) error {
 		return errors.New(what)
 	}
 	return fmt.Errorf("%s %s; the relay needs subjects stored as published", where, what)
+}
+
+// rewritesSource reports a source or mirror that may store messages under subjects other than their own. A
+// transform keeps a subject only without a destination, or with a destination equal to its source and free of
+// mapping syntax ($n, {{...}}), which would rewrite even then.
+func rewritesSource(src *jetstream.StreamSource) bool {
+	if src == nil {
+		return false
+	}
+	return slices.ContainsFunc(src.SubjectTransforms, func(t jetstream.SubjectTransformConfig) bool {
+		return t.Destination != "" && (t.Destination != t.Source || strings.ContainsAny(t.Destination, "${}"))
+	})
 }

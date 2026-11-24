@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mrrobertkent/hookgate/internal/contract"
@@ -22,27 +23,27 @@ const stderrTail = 4 << 10
 // waitDelay bounds how long a finished or killed handler's output pipes are read after it exits.
 const waitDelay = 5 * time.Second
 
-// Exit codes from sysexits.h that report a transient environment fault rather than a bad event.
+// Exit codes with a meaning of their own; every other non-zero exit retries.
 const (
-	exitUnavailable = 69 // EX_UNAVAILABLE
-	exitOSErr       = 71 // EX_OSERR
-	exitIOErr       = 74 // EX_IOERR
-	exitTempFail    = 75 // EX_TEMPFAIL
-	exitCannotExec  = 126
-	exitNotFound    = 127
+	exitDataErr    = 65 // EX_DATAERR: the handler rejects the event
+	exitConfig     = 78 // EX_CONFIG: the handler is misconfigured
+	exitCannotExec = 126
+	exitNotFound   = 127
 )
 
 // commandDeliverer runs the configured program once per event.
 type commandDeliverer struct {
-	cfg CommandHandler
-	env []string // env_allow copies and set_env values, fixed at start
-	log *slog.Logger
+	cfg    CommandHandler
+	env    []string // env_allow copies and set_env values, fixed at start
+	limits execLimits
+	log    *slog.Logger
 }
 
-// newCommandDeliverer resolves set_env secrets once, at start.
-func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDeliverer, error) {
+// newCommandDeliverer resolves set_env secrets once, at start, and checks that they and the arguments fit an execve
+// with room for events on subjects.
+func newCommandDeliverer(cfg CommandHandler, subjects []string, log *slog.Logger) (*commandDeliverer, error) {
 	var env []string
-	for _, name := range cfg.EnvAllow {
+	for _, name := range slices.Compact(slices.Sorted(slices.Values(cfg.EnvAllow))) {
 		if v, ok := os.LookupEnv(name); ok {
 			env = append(env, name+"="+v)
 		}
@@ -62,14 +63,28 @@ func newCommandDeliverer(cfg CommandHandler, log *slog.Logger) (*commandDelivere
 			env = append(env, name+"="+v)
 		}
 	}
-	return &commandDeliverer{cfg: cfg, env: env, log: log}, nil
+	limits := currentExecLimits()
+	for _, s := range subjects {
+		limits.subject = max(limits.subject, len(s))
+	}
+	if err := checkExecSize(cfg.Path, cfg.Args, env, limits); err != nil {
+		return nil, err
+	}
+	return &commandDeliverer{cfg: cfg, env: env, limits: limits, log: log}, nil
 }
 
 func (c *commandDeliverer) deliver(ctx context.Context, ev *event) result {
 	runCtx, cancel := context.WithTimeout(ctx, c.cfg.Timeout)
 	defer cancel()
+	evEnv := eventEnv(ev)
+	if slices.ContainsFunc(evEnv, func(kv string) bool { return strings.IndexByte(kv, 0) >= 0 }) {
+		// No environment can carry a NUL byte; the event cannot be handed over.
+		res := result{verdict: verdictReject, detail: "event metadata contains a NUL byte"}
+		c.log.Warn("handler failed", "seq", ev.streamSeq, "attempt", ev.attempt, "result", res.verdict.String(), "detail", res.detail)
+		return res
+	}
 	cmd := exec.Command(c.cfg.Path, c.cfg.Args...) //nolint:gosec // G204: the operator configures the program; event data only reaches its stdin and environment.
-	cmd.Env = append(slices.Clone(c.env), eventEnv(ev)...)
+	cmd.Env = append(slices.Clone(c.env), evEnv...)
 	cmd.Stdin = bytes.NewReader(ev.body)
 	stderr := &tailBuffer{max: stderrTail}
 	cmd.Stderr = stderr
@@ -77,6 +92,10 @@ func (c *commandDeliverer) deliver(ctx context.Context, ev *event) result {
 	isolate(cmd)
 	err := run(runCtx, cmd)
 	res := c.classify(ctx, runCtx, cmd, err)
+	if cmd.Process == nil && startFailure(err) == startTooLarge && c.limits.withinReserve(evEnv) {
+		// The start check left room for this event; what took it is outside the relay's view.
+		res = resultf(verdictPause, "start %s: argument list too long although the event fits the room reserved for it; an interpreter or the stack limit leaves less than the relay assumes", c.cfg.Path)
+	}
 	if res.verdict != verdictAck {
 		c.log.Warn("handler failed", "seq", ev.streamSeq, "attempt", ev.attempt, "result", res.verdict.String(),
 			"detail", res.detail, "stderr", stderr.String())
@@ -141,16 +160,18 @@ func (c *commandDeliverer) classify(ctx, runCtx context.Context, cmd *exec.Cmd, 
 	return exitResult(ee.ExitCode())
 }
 
-// exitResult maps an exit status. The detail never carries handler output, which may hold secrets or body data.
+// exitResult maps an exit status. An unknown failure retries: runtimes exit 1 or 2 on an unhandled error, which is
+// as likely transient as not, so only an explicit 65 rejects. The detail never carries handler output, which may
+// hold secrets or body data.
 func exitResult(code int) result {
 	detail := "exit status " + strconv.Itoa(code)
 	switch code {
-	case exitUnavailable, exitOSErr, exitIOErr, exitTempFail:
-		return result{verdict: verdictRetry, detail: detail}
-	case exitCannotExec, exitNotFound:
+	case exitDataErr:
+		return result{verdict: verdictReject, detail: detail}
+	case exitConfig, exitCannotExec, exitNotFound:
 		return result{verdict: verdictPause, detail: detail}
 	}
-	return result{verdict: verdictReject, detail: detail}
+	return result{verdict: verdictRetry, detail: detail}
 }
 
 // startResult maps a start error: a transient resource shortage retries, an environment too large for this event

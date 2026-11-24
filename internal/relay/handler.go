@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // verdict is a handler's answer about one event.
@@ -24,6 +25,7 @@ func (v verdict) String() string {
 type result struct {
 	verdict verdict
 	detail  string
+	after   time.Duration // the handler's requested retry delay (Retry-After), if any
 }
 
 func resultf(v verdict, format string, args ...any) result {

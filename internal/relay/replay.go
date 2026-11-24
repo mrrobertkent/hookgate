@@ -63,7 +63,14 @@ func (rp *Replayer) Replay(ctx context.Context, seq uint64) (Replayed, error) {
 		return Replayed{}, fmt.Errorf("%s:%d: %w", rp.cfg.DeadLetter.Stream, seq, err)
 	}
 	id := "replay:" + rp.cfg.DeadLetter.Stream + ":" + strconv.FormatUint(seq, 10)
-	if err = rp.fit(ctx, msg, stream, id); err != nil {
+	st, err := rp.js.Stream(ctx, stream)
+	if err != nil {
+		return Replayed{}, fmt.Errorf("stream %s: %w", stream, err)
+	}
+	if err = checkRouting("stream "+stream, st.CachedInfo().Config); err != nil {
+		return Replayed{}, err
+	}
+	if err = rp.fit(ctx, msg, st, id); err != nil {
 		return Replayed{}, fmt.Errorf("%s:%d: %w", rp.cfg.DeadLetter.Stream, seq, err)
 	}
 	pctx, cancel := context.WithTimeout(ctx, publishTimeout)
@@ -78,8 +85,13 @@ func (rp *Replayer) Replay(ctx context.Context, seq uint64) (Replayed, error) {
 // replayMsg rebuilds the event from a record: contract and application headers only, plus the replay marker.
 func (rp *Replayer) replayMsg(rec *jetstream.RawStreamMsg) (*nats.Msg, string, error) {
 	h := rec.Header
-	if h.Get(contract.HeaderDeadReason) == "" {
+	switch h.Get(contract.HeaderDeadReason) {
+	case "":
 		return nil, "", errors.New("not a dead-letter record")
+	case contract.DeadInvalidMessage:
+		// Replaying cannot repair a malformed event, and a replay received outside its consumer's replay subject
+		// must not be handed to the consumer that refused it.
+		return nil, "", fmt.Errorf("an %s record is not replayed", contract.DeadInvalidMessage)
 	}
 	consumer, stream := h.Get(contract.HeaderOriginalConsumer), h.Get(contract.HeaderOriginalStream)
 	if !validName(consumer) || !validName(stream) {
@@ -112,14 +124,11 @@ const replayReuseWithin = 24 * time.Hour
 
 // fit moves a body too large for the event stream into the claim-check store, as the gateway does, and replaces
 // it with a claim reference.
-func (rp *Replayer) fit(ctx context.Context, msg *nats.Msg, stream, id string) error {
+func (rp *Replayer) fit(ctx context.Context, msg *nats.Msg, st jetstream.Stream, id string) error {
 	if len(msg.Data) == 0 {
 		return nil
 	}
-	st, err := rp.js.Stream(ctx, stream)
-	if err != nil {
-		return fmt.Errorf("stream %s: %w", stream, err)
-	}
+	stream := st.CachedInfo().Config.Name
 	limit := rp.js.Conn().MaxPayload()
 	if m := int64(st.CachedInfo().Config.MaxMsgSize); m > 0 {
 		limit = min(limit, m)
@@ -130,7 +139,7 @@ func (rp *Replayer) fit(ctx context.Context, msg *nats.Msg, stream, id string) e
 	if rp.claims == nil {
 		return fmt.Errorf("body of %d bytes exceeds what stream %s accepts inline and claim_check is not configured", len(msg.Data), stream)
 	}
-	if err = checkClaimBucket(ctx, rp.claims, st.CachedInfo().Config); err != nil {
+	if err := checkClaimBucket(ctx, rp.claims, st.CachedInfo().Config); err != nil {
 		return err
 	}
 	h := msg.Header

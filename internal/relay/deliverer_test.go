@@ -40,7 +40,7 @@ func command(t *testing.T, timeout time.Duration, args ...string) *commandDelive
 	t.Helper()
 	h := helperHandler(t, args...).Command
 	h.Timeout = timeout
-	d, err := newCommandDeliverer(*h, slog.New(slog.NewTextHandler(t.Output(), nil)))
+	d, err := newCommandDeliverer(*h, nil, slog.New(slog.NewTextHandler(t.Output(), nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,15 +53,23 @@ func TestCommandExitMapping(t *testing.T) {
 		want verdict
 	}{
 		{[]string{"exit", "0"}, verdictAck},
-		{[]string{"exit", "1"}, verdictReject},
-		{[]string{"exit", "2"}, verdictReject},
+		{[]string{"exit", "1"}, verdictRetry},
+		{[]string{"exit", "2"}, verdictRetry},
+		{[]string{"exit", "3"}, verdictRetry},
+		{[]string{"exit", "64"}, verdictRetry},
 		{[]string{"exit", "65"}, verdictReject},
+		{[]string{"exit", "66"}, verdictRetry},
 		{[]string{"exit", "69"}, verdictRetry},
 		{[]string{"exit", "71"}, verdictRetry},
 		{[]string{"exit", "74"}, verdictRetry},
 		{[]string{"exit", "75"}, verdictRetry},
+		{[]string{"exit", "77"}, verdictRetry},
+		{[]string{"exit", "78"}, verdictPause},
+		{[]string{"exit", "125"}, verdictRetry},
 		{[]string{"exit", "126"}, verdictPause},
 		{[]string{"exit", "127"}, verdictPause},
+		{[]string{"exit", "128"}, verdictRetry},
+		{[]string{"exit", "255"}, verdictRetry},
 		{[]string{"kill"}, verdictRetry},
 	}
 	for _, tc := range cases {
@@ -75,8 +83,8 @@ func TestCommandExitMapping(t *testing.T) {
 }
 
 func TestCommandRejectDetail(t *testing.T) {
-	res := command(t, 10*time.Second, "stderr", "3", "unknown event type").deliver(context.Background(), testEvent())
-	if res.verdict != verdictReject || res.detail != "exit status 3" {
+	res := command(t, 10*time.Second, "stderr", "65", "unknown event type").deliver(context.Background(), testEvent())
+	if res.verdict != verdictReject || res.detail != "exit status 65" {
 		t.Errorf("%s %q", res.verdict, res.detail)
 	}
 }
@@ -147,7 +155,7 @@ func TestCommandStartErrors(t *testing.T) {
 	}
 	for _, path := range []string{filepath.Join(dir, "missing"), noExec, garbage, dir, loop, filepath.Join(noExec, "x")} {
 		t.Run(filepath.Base(path), func(t *testing.T) {
-			d, err := newCommandDeliverer(CommandHandler{Path: path, Timeout: time.Second}, slog.New(slog.DiscardHandler))
+			d, err := newCommandDeliverer(CommandHandler{Path: path, Timeout: time.Second}, nil, slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -166,7 +174,7 @@ func TestCommandInputs(t *testing.T) {
 	h := helperHandler(t, "record", dir).Command
 	h.EnvAllow = []string{"RELAY_TEST_ALLOWED", "RELAY_TEST_UNSET"}
 	h.SetEnv = map[string]config.SecretRef{"TOKEN": {Env: "RELAY_TEST_SECRET_SRC"}, "OPTIONAL": {Env: "RELAY_TEST_UNSET", Optional: true}}
-	d, err := newCommandDeliverer(*h, slog.New(slog.DiscardHandler))
+	d, err := newCommandDeliverer(*h, nil, slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,9 +239,13 @@ func TestHTTPStatusMapping(t *testing.T) {
 		want   verdict
 	}{
 		{200, verdictAck}, {202, verdictAck}, {204, verdictAck},
-		{301, verdictPause}, {302, verdictPause}, {307, verdictPause}, {308, verdictPause},
-		{400, verdictReject}, {404, verdictReject}, {409, verdictReject}, {410, verdictReject}, {422, verdictReject},
-		{429, verdictRetry}, {500, verdictRetry}, {502, verdictRetry}, {503, verdictRetry},
+		{300, verdictPause}, {301, verdictPause}, {302, verdictPause}, {304, verdictPause}, {307, verdictPause}, {308, verdictPause},
+		{400, verdictReject}, {413, verdictReject}, {415, verdictReject}, {422, verdictReject},
+		{401, verdictPause}, {403, verdictPause},
+		{402, verdictRetry}, {404, verdictRetry}, {405, verdictRetry}, {406, verdictRetry}, {408, verdictRetry},
+		{409, verdictRetry}, {410, verdictRetry}, {418, verdictRetry}, {425, verdictRetry}, {429, verdictRetry},
+		{451, verdictRetry}, {499, verdictRetry},
+		{500, verdictRetry}, {501, verdictRetry}, {502, verdictRetry}, {503, verdictRetry}, {504, verdictRetry}, {599, verdictRetry},
 	}
 	for _, tc := range cases {
 		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
