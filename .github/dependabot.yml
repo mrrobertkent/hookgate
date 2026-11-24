@@ -6,6 +6,10 @@ updates:
   - package-ecosystem: github-actions
     directory: /
     schedule: {interval: weekly}
+    groups:
+      # The CodeQL steps must share one version; analyze fails against a mismatched init.
+      codeql-action:
+        patterns: ["github/codeql-action*"]
   - package-ecosystem: docker
     directory: /
     schedule: {interval: weekly}
