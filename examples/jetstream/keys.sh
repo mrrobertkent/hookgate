@@ -5,7 +5,10 @@ set -eu
 for id in admin hookgate relay replay; do
   [ -s "/keys/$id/$id.nk" ] || nk -gen user > "/keys/$id/$id.nk"
 done
-pub() { nk -inkey "/keys/$1/$1.nk" -pubout; }
+pub() {
+  local user="$1"
+  nk -inkey "/keys/$user/$user.nk" -pubout
+}
 admin=$(pub admin)
 hookgate=$(pub hookgate)
 relay=$(pub relay)

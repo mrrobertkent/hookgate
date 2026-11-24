@@ -125,17 +125,19 @@ func (r *Relay) Run(ctx context.Context) error {
 	}
 	r.log.Info("relay started", "admin", ln.Addr().String(), "stream", r.cfg.Stream, "consumer", r.cfg.Consumer, "handler", r.cfg.handlerTarget())
 
-	checkCtx, stopChecks := context.WithCancel(context.Background())
+	// Checks, in-flight work and the connection drain outlive ctx: they stop on their own schedule during the drain.
+	detached := context.WithoutCancel(ctx)
+	checkCtx, stopChecks := context.WithCancel(detached)
 	checksDone := make(chan struct{})
 	go func() { r.checkLoop(checkCtx); close(checksDone) }()
-	work, cancelWork := context.WithCancel(context.Background())
+	work, cancelWork := context.WithCancel(detached)
 	defer cancelWork()
 
 	r.fetchLoop(ctx, work)
 	r.drain(cancelWork)
 	stopChecks()
 	<-checksDone
-	dctx, cancel := context.WithTimeout(context.Background(), connDrainTimeout)
+	dctx, cancel := context.WithTimeout(detached, connDrainTimeout)
 	defer cancel()
 	if err := r.nc.Drain(dctx); err != nil {
 		r.log.Warn("nats drain", "error", err)

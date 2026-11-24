@@ -14,10 +14,12 @@ import (
 // FuzzMessageHeaders checks that contract-header parsing never panics, accepts only well-formed values and that
 // dead-letter details stay bounded, valid UTF-8 without control characters.
 func FuzzMessageHeaders(f *testing.F) {
-	f.Add("1", "resend", "64", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "", "", []byte("body"))
-	f.Add("1", "resend", "0", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "B", "k", []byte{})
-	f.Add("2", "", "-1", "XYZ", "", "k", []byte("x"))
-	f.Fuzz(func(t *testing.T, version, source, size, sum, bucket, key string, body []byte) {
+	f.Add("1", "resend", "64", "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", "", []byte("body"))
+	f.Add("1", "resend", "0", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "B/k", []byte{})
+	f.Add("2", "", "-1", "XYZ", "/k", []byte("x"))
+	f.Fuzz(func(t *testing.T, version, source, size, sum, claim string, body []byte) {
+		// claim is "bucket/key": the two claim headers vary together.
+		bucket, key, _ := strings.Cut(claim, "/")
 		h := nats.Header{}
 		for name, v := range map[string]string{
 			contract.HeaderContract: version, contract.HeaderSource: source, contract.HeaderBodySize: size,

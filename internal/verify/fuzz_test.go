@@ -113,7 +113,7 @@ func FuzzStandardWebhooksSecret(f *testing.F) {
 		key, err := standardWebhooksKey(secret)
 		ref, refErr := standardwebhooks.NewWebhook(secret)
 		decoded, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(secret, "whsec_"))
-		if wantOK := refErr == nil && len(decoded) >= minStandardWebhooksKeyBytes; (err == nil) != wantOK {
+		if (err == nil) != (refErr == nil && len(decoded) >= minStandardWebhooksKeyBytes) {
 			t.Fatalf("secret %q: err=%v, reference err=%v", secret, err, refErr)
 		}
 		if err != nil {
