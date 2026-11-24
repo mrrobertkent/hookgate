@@ -198,10 +198,24 @@ func retryCreate[T any](create func(context.Context) (T, error)) (T, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		v, err := create(ctx)
 		cancel()
-		if err == nil || time.Now().After(deadline) || !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, nats.ErrTimeout) && !errors.Is(err, jetstream.ErrNoStreamResponse) && !errors.Is(err, nats.ErrNoResponders) {
+		if err == nil || time.Now().After(deadline) || !retryable(err) {
 			return v, err
 		}
+		time.Sleep(250 * time.Millisecond)
 	}
+}
+
+// jsUnavailable is the server's "JetStream system temporarily unavailable" code, sent while the meta group has
+// no leader; nats.go has no constant for it.
+const jsUnavailable jetstream.ErrorCode = 10008
+
+func retryable(err error) bool {
+	var apiErr *jetstream.APIError
+	if errors.As(err, &apiErr) && apiErr.ErrorCode == jsUnavailable {
+		return true
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) ||
+		errors.Is(err, jetstream.ErrNoStreamResponse) || errors.Is(err, nats.ErrNoResponders)
 }
 
 // CreateBucket creates an Object Store bucket and fails the test on error.
