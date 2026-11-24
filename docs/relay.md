@@ -243,7 +243,7 @@ The relay's object-store grants are what the stock Object Store reader uses: it 
 
 ## Operations
 
-- **Health:** `GET /healthz` (process up; the image's `HEALTHCHECK`), `GET /readyz` (`200` only while connected, every [consumer check](#consumer) passes, not paused and not draining; otherwise `503` with the reason).
+- **Health:** `GET /healthz` (process up; the image's `HEALTHCHECK`), `GET /readyz` (`200` only while connected with accepted credentials, every [consumer check](#consumer) passes, not paused and not draining; otherwise `503` with the reason).
 - **Logs:** JSON on stderr, one line per settled delivery: `seq`, `subject`, `attempt`, `source`, `event_id`, `outcome`, and `reason`/`detail` when set. A failing command's last 4 KiB of stderr is logged with it, and only there: never in dead-letter records, `/readyz` or metrics. Handlers must not print secrets or body data to stderr. The relay never logs bodies.
 - **Metrics** (`GET /metrics`):
 
@@ -260,8 +260,9 @@ The relay's object-store grants are what the stock Object Store reader uses: it 
 | `hookgate_relay_consumer_ack_pending` | gauge | — |
 | `hookgate_relay_consumer_redelivered` | gauge | — |
 | `hookgate_relay_connected` | gauge | — |
+| `hookgate_relay_nats_credentials_rejected` | gauge | — (`1` from a credential fault until the next successful connection: the server rejects the credentials or client certificate, the server's certificate fails verification, or a seed or creds file cannot be read or parsed when signing in again; the relay retries and is not ready. Credentials that cannot be loaded at start are logged and stop the relay instead) |
 | `hookgate_relay_ready` | gauge | — |
 | `hookgate_relay_paused` | gauge | — |
 | `hookgate_relay_in_flight` | gauge | — |
 
-Alert on `increase(hookgate_relay_dead_letters_total[1h]) > 0`, on `hookgate_relay_dead_letter_publish_failures_total` or `hookgate_relay_max_deliveries_advisories_total` increasing, on `hookgate_relay_paused == 1`, and on `hookgate_relay_ready == 0` for longer than a few minutes. Pending and ack-pending counts are per consumer, so every relay of a consumer reports the same values.
+Alert on `increase(hookgate_relay_dead_letters_total[1h]) > 0`, on `hookgate_relay_dead_letter_publish_failures_total` or `hookgate_relay_max_deliveries_advisories_total` increasing, on `hookgate_relay_paused == 1` or `hookgate_relay_nats_credentials_rejected == 1`, and on `hookgate_relay_ready == 0` for longer than a few minutes. Pending and ack-pending counts are per consumer, so every relay of a consumer reports the same values.

@@ -171,7 +171,7 @@ connections:
 | `nats.inbox_prefix` | `_INBOX.<name>` | Prefix of the reply subjects; the identity needs subscribe permission on `<prefix>.>` only. Dot-separated tokens without whitespace or wildcards. |
 | `nats.connect_timeout` | `5s` | Limit for one connection attempt. The client holds its lock during an attempt, so a publish that starts while the client is in a reconnect handshake can wait up to this long before it fails or proceeds. |
 
-Authentication secrets may not be `optional`. An unset or unusable one makes every source using the connection not ready, like a missing check secret. An unreachable server is not an error: the client retries forever (with jitter), and the sources answer `503` until it connects. Rejected credentials are retried too: the server refusing the authentication (authorization violation, expired or revoked authentication) or the client certificate, the server's certificate failing verification against `tls.ca`, or a seed or creds file that cannot be read or parsed when the client signs in again. Once seen, a rejection lasts until the connection succeeds. Meanwhile the sources answer `503`, the rejection is logged and `hookgate_nats_credentials_rejected` is `1`. Publishing never waits for a reconnect behind the scenes; it fails at once and the output retries within its `timeout`.
+Authentication secrets may not be `optional`. An unset or unusable one (a seed, creds or TLS file that cannot be read or parsed) makes every source using the connection not ready, like a missing check secret; it is logged and `hookgate_nats_credentials_rejected` is `1` until the file is fixed and hookgate restarted. An unreachable server is not an error: the client retries forever (with jitter), and the sources answer `503` until it connects. Rejected credentials are retried too: the server refusing the authentication (authorization violation, expired or revoked authentication) or the client certificate, the server's certificate failing verification against `tls.ca`, or a seed or creds file that cannot be read or parsed when the client signs in again. Once seen, a rejection lasts until the connection succeeds. Meanwhile the sources answer `503`, the rejection is logged and `hookgate_nats_credentials_rejected` is `1`. Publishing never waits for a reconnect behind the scenes; it fails at once and the output retries within its `timeout`.
 
 ## `output.http`
 
@@ -256,7 +256,7 @@ A disconnect invalidates the last check, and so does any reconnect, counted by t
 | `hookgate_publish_duration_seconds` | histogram | `source`; one observation per publish attempt |
 | `hookgate_claim_check_puts_total` | counter | `source`, `result` = `ok`, `error` |
 | `hookgate_nats_connected` | gauge | `connection` |
-| `hookgate_nats_credentials_rejected` | gauge | `connection`; `1` while the connection is down because its credentials or certificates are rejected |
+| `hookgate_nats_credentials_rejected` | gauge | `connection`; `1` while the connection is down because its credentials or certificates are rejected or cannot be loaded |
 | `hookgate_source_ready` | gauge | `source` |
 | `hookgate_ready` | gauge | —; `1` while `/readyz` answers `200` |
 | `hookgate_in_flight_requests` | gauge | — |

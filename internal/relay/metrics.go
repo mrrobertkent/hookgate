@@ -25,6 +25,7 @@ type relayMetrics struct {
 	ackPending         *metrics.Gauge
 	redelivered        *metrics.Gauge
 	connected          *metrics.Gauge
+	rejected           *metrics.Gauge
 	ready              *metrics.Gauge
 	paused             *metrics.Gauge
 	inFlight           *metrics.Gauge
@@ -45,6 +46,7 @@ func newMetrics() *relayMetrics {
 		ackPending:         r.Gauge("hookgate_relay_consumer_ack_pending", "Messages delivered and not yet acknowledged."),
 		redelivered:        r.Gauge("hookgate_relay_consumer_redelivered", "Messages redelivered and not yet acknowledged."),
 		connected:          r.Gauge("hookgate_relay_connected", "1 while connected to NATS."),
+		rejected:           r.Gauge("hookgate_relay_nats_credentials_rejected", "1 while the NATS credentials or certificates are rejected or cannot be loaded, else 0."),
 		ready:              r.Gauge("hookgate_relay_ready", "1 while the relay is ready and fetching."),
 		paused:             r.Gauge("hookgate_relay_paused", "1 after a handler configuration fault; fetching stops until restart."),
 		inFlight:           r.Gauge("hookgate_relay_in_flight", "Events being processed."),
