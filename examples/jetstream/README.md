@@ -63,7 +63,7 @@ docker compose run --rm --no-deps setup nats stream get WEBHOOK_EVENTS 1   # inl
 docker compose run --rm --no-deps setup nats stream get WEBHOOK_EVENTS 2   # empty body, Hookgate-Claim-* headers
 docker compose run --rm --no-deps setup nats object ls WEBHOOK_CLAIMS
 curl -s localhost:9090/metrics | grep -E 'hookgate_(publish|claim|nats|source_ready)'
-curl -s localhost:9091/metrics | grep -E 'hookgate_relay_(deliveries|dead_letters)'
+curl -s localhost:9091/metrics | grep -E '^hookgate_relay_(info|deliveries|dead_letters)'   # info: stream and consumer
 ```
 
 Lose a node while sending: the stream keeps a quorum and hookgate reconnects to another server.

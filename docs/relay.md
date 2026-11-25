@@ -249,6 +249,7 @@ The relay's object-store grants are what the stock Object Store reader uses: it 
 
 | Metric | Type | Labels |
 |---|---|---|
+| `hookgate_relay_info` | gauge | `stream`, `consumer` (always `1`, from start: before the first delivery and while not ready) |
 | `hookgate_relay_deliveries_total` | counter | `outcome` = `acked`, `retried`, `dead_lettered`, `dead_letter_failed`, `paused`, `shutdown` |
 | `hookgate_relay_handler_duration_seconds` | histogram | `result` = `ack`, `retry`, `reject`, `pause`, `cancelled` |
 | `hookgate_relay_dead_letters_total` | counter | `reason` |
@@ -266,3 +267,5 @@ The relay's object-store grants are what the stock Object Store reader uses: it 
 | `hookgate_relay_in_flight` | gauge | — |
 
 Alert on `increase(hookgate_relay_dead_letters_total[1h]) > 0`, on `hookgate_relay_dead_letter_publish_failures_total` or `hookgate_relay_max_deliveries_advisories_total` increasing, on `hookgate_relay_paused == 1` or `hookgate_relay_nats_credentials_rejected == 1`, and on `hookgate_relay_ready == 0` for longer than a few minutes. Pending and ack-pending counts are per consumer, so every relay of a consumer reports the same values.
+
+`hookgate_relay_info` names the stream and durable consumer a relay delivers from. One consumer can have many relays ([Scaling and ordering](#scaling-and-ordering)): each reports the same `stream` and `consumer`, and the scrape target's labels, such as `instance`, tell them apart. The other relay metrics carry no stream or consumer label; join them to `hookgate_relay_info` to group by consumer ([aggregating across relays](high-availability.md#relays)).

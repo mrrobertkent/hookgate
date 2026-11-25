@@ -331,7 +331,7 @@ A runnable three-node cluster with the gateway: [examples/jetstream](examples/je
 - **Health:** `GET /healthz` on the admin port (process up), `GET /readyz` (`503` while draining, and optionally while an output connection is lost: [readiness](docs/configuration.md#readiness)). The image's `HEALTHCHECK` runs `hookgate healthcheck`.
 - **Graceful rollout:** on SIGTERM hookgate keeps serving for `drain_delay`, then gives in-flight requests `shutdown_timeout`, then drains its NATS connections. Set your orchestrator's stop grace period above their sum.
 - **Limits:** per-source body cap, server read and idle timeouts, `max_concurrent` in-flight requests (`503` beyond it).
-- **Metrics:** `GET /metrics` exposes request outcomes, upstream and publish attempts, publish latency, claim-check stores, NATS connection state, source readiness, in-flight requests, draining and instance readiness ([list](docs/configuration.md#metrics)). Alert on `hookgate_source_ready == 0`, `hookgate_nats_connected == 0`, `hookgate_nats_credentials_rejected == 1` and on `outcome=~"upstream_error|output_error"`.
+- **Metrics:** `GET /metrics` exposes request outcomes, upstream and publish attempts, publish latency, claim-check stores, NATS connection state, source readiness, in-flight requests, draining and instance readiness ([list](docs/configuration.md#metrics)). Alert on `hookgate_source_ready == 0`, `hookgate_nats_connected == 0`, `hookgate_nats_credentials_rejected == 1` and on `outcome=~"upstream_error|output_error"`. The relay serves its own metrics on its admin port ([list](docs/relay.md#operations)).
 - **Logs:** one JSON line per request with source, outcome, status, reason and timing. Secrets, signatures and bodies are never logged.
 
 ## High availability
