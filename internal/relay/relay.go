@@ -71,7 +71,7 @@ func New(cfg *Config, log *slog.Logger) (*Relay, error) {
 	r := &Relay{
 		cfg:           cfg,
 		log:           log,
-		m:             newMetrics(),
+		m:             newMetrics(cfg.Stream, cfg.Consumer),
 		deadSubject:   cfg.deadSubject(),
 		replaySubject: cfg.replaySubject(),
 		checkErr:      errors.New("not checked yet"),

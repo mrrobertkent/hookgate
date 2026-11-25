@@ -38,6 +38,9 @@ func TestDeliverAck(t *testing.T) {
 	if metric(r.Relay, outcome(outcomeAcked)) != 1 || len(e.deadRecords(t)) != 0 {
 		t.Errorf("acked %v, dead %d", metric(r.Relay, outcome(outcomeAcked)), len(e.deadRecords(t)))
 	}
+	if v := metric(r.Relay, `hookgate_relay_info{stream="`+eventStream+`",consumer="rex"}`); v != 1 {
+		t.Errorf("info %v", v)
+	}
 }
 
 func TestBackoffThenDeadLetter(t *testing.T) {

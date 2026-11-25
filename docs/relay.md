@@ -249,6 +249,7 @@ The relay's object-store grants are what the stock Object Store reader uses: it 
 
 | Metric | Type | Labels |
 |---|---|---|
+| `hookgate_relay_info` | gauge | `stream`, `consumer` (always `1`; joins the consumer's NATS-side metrics to the relay that serves it) |
 | `hookgate_relay_deliveries_total` | counter | `outcome` = `acked`, `retried`, `dead_lettered`, `dead_letter_failed`, `paused`, `shutdown` |
 | `hookgate_relay_handler_duration_seconds` | histogram | `result` = `ack`, `retry`, `reject`, `pause`, `cancelled` |
 | `hookgate_relay_dead_letters_total` | counter | `reason` |

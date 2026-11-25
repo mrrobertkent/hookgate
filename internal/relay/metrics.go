@@ -14,6 +14,7 @@ const (
 
 type relayMetrics struct {
 	reg                *metrics.Registry
+	info               *metrics.Gauge
 	deliveries         *metrics.Counter
 	handlerDuration    *metrics.Histogram
 	deadLetters        *metrics.Counter
@@ -31,10 +32,11 @@ type relayMetrics struct {
 	inFlight           *metrics.Gauge
 }
 
-func newMetrics() *relayMetrics {
+func newMetrics(stream, consumer string) *relayMetrics {
 	r := metrics.NewRegistry()
-	return &relayMetrics{
+	m := &relayMetrics{
 		reg:                r,
+		info:               r.Gauge("hookgate_relay_info", "Always 1; labels name the stream and consumer this relay serves.", "stream", "consumer"),
 		deliveries:         r.Counter("hookgate_relay_deliveries_total", "Deliveries settled, by outcome.", "outcome"),
 		handlerDuration:    r.Histogram("hookgate_relay_handler_duration_seconds", "Handler run time, by result.", metrics.DurationBuckets, "result"),
 		deadLetters:        r.Counter("hookgate_relay_dead_letters_total", "Events written to the dead-letter stream, by reason.", "reason"),
@@ -51,4 +53,6 @@ func newMetrics() *relayMetrics {
 		paused:             r.Gauge("hookgate_relay_paused", "1 after a handler configuration fault; fetching stops until restart."),
 		inFlight:           r.Gauge("hookgate_relay_in_flight", "Events being processed."),
 	}
+	m.info.Set(1, stream, consumer)
+	return m
 }
