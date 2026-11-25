@@ -146,12 +146,12 @@ func TestRetryAfterThroughBroker(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 	e := newEnv(t)
-	e.consumer(t, "rex")
-	cfg := e.config(t, "rex", Handler{HTTP: &HTTPHandler{URL: srv.URL, Timeout: 5 * time.Second}})
+	e.consumer(t, "app")
+	cfg := e.config(t, "app", Handler{HTTP: &HTTPHandler{URL: srv.URL, Timeout: 5 * time.Second}})
 	cfg.Backoff = []time.Duration{100 * time.Millisecond, 10 * time.Second}
 	start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("{}")})
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(at) != 2 {
@@ -171,14 +171,14 @@ func TestCommandRejectRetriesUnknownExit(t *testing.T) {
 	}{"1": {contract.DeadMaxAttempts, 3}, "65": {contract.DeadHandlerRejected, 1}} {
 		t.Run(code, func(t *testing.T) {
 			e := newEnv(t)
-			e.consumer(t, "rex")
+			e.consumer(t, "app")
 			dir := t.TempDir()
-			cfg := e.config(t, "rex", helperHandler(t, "record", dir, code))
+			cfg := e.config(t, "app", helperHandler(t, "record", dir, code))
 			cfg.MaxAttempts = 3
 			start(t, cfg, true)
 			seq := e.publish(t, pub{body: []byte("{}")})
 			recs := e.waitDead(t, 1)
-			e.waitSettled(t, "rex", seq)
+			e.waitSettled(t, "app", seq)
 			if got := recs[0].Header.Get(contract.HeaderDeadReason); got != want.reason {
 				t.Errorf("reason %q, want %q", got, want.reason)
 			}
@@ -275,7 +275,7 @@ func TestReadinessDeadLetterKeepsRecords(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
-			e.consumer(t, "rex")
+			e.consumer(t, "app")
 			update := func(c jetstream.StreamConfig, modify func(*jetstream.StreamConfig)) {
 				if modify == nil {
 					return
@@ -289,7 +289,7 @@ func TestReadinessDeadLetterKeepsRecords(t *testing.T) {
 			}
 			update(jetstream.StreamConfig{Name: eventStream, Subjects: []string{"webhooks.events.>", "webhooks.replay.>"}, Duplicates: time.Minute}, tc.events)
 			update(jetstream.StreamConfig{Name: deadStream, Subjects: []string{"webhooks.dead.>"}, AllowDirect: true, Discard: jetstream.DiscardNew}, tc.dead)
-			r := start(t, e.config(t, "rex", helperHandler(t, "exit", "0")), tc.want == "")
+			r := start(t, e.config(t, "app", helperHandler(t, "exit", "0")), tc.want == "")
 			if tc.want == "" {
 				return
 			}
@@ -412,12 +412,12 @@ func TestStaticEnvWithNUL(t *testing.T) {
 // dead-lettered as invalid without running the handler.
 func TestReplayOnlyOnOwnSubject(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	start(t, e.config(t, "rex", helperHandler(t, "record", dir)), true)
+	start(t, e.config(t, "app", helperHandler(t, "record", dir)), true)
 	seq := e.publish(t, pub{body: []byte("{}"), extra: map[string]string{contract.HeaderReplay: "WEBHOOK_DEAD:1"}})
 	recs := e.waitDead(t, 1)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	if got := recs[0].Header.Get(contract.HeaderDeadReason); got != contract.DeadInvalidMessage {
 		t.Errorf("reason %q", got)
 	}
@@ -426,11 +426,11 @@ func TestReplayOnlyOnOwnSubject(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := NewReplayer(e.config(t, "rex", helperHandler(t, "exit", "0")), e.js).Replay(ctx, recs[0].Sequence); err == nil {
+	if _, err := NewReplayer(e.config(t, "app", helperHandler(t, "exit", "0")), e.js).Replay(ctx, recs[0].Sequence); err == nil {
 		t.Error("the refused replay was replayed")
 	}
-	own := e.publish(t, pub{body: []byte("{}"), subject: "webhooks.replay.rex", extra: map[string]string{contract.HeaderReplay: "WEBHOOK_DEAD:1"}})
-	e.waitSettled(t, "rex", own)
+	own := e.publish(t, pub{body: []byte("{}"), subject: "webhooks.replay.app", extra: map[string]string{contract.HeaderReplay: "WEBHOOK_DEAD:1"}})
+	e.waitSettled(t, "app", own)
 	if n := len(readRecords(t, dir)); n != 1 {
 		t.Errorf("own replay: handler ran %d times", n)
 	}
@@ -470,13 +470,13 @@ func TestTooLargeWithinReserve(t *testing.T) {
 }
 
 func TestReplayMarkerAnyValue(t *testing.T) {
-	r := &Relay{replaySubject: "webhooks.replay.rex"}
+	r := &Relay{replaySubject: "webhooks.replay.app"}
 	for _, v := range [][]string{{""}, {"", "WEBHOOK_DEAD:1"}, {"WEBHOOK_DEAD:1"}} {
 		if r.checkReplay(eventSubj, nats.Header{contract.HeaderReplay: v}) == nil {
 			t.Errorf("marker %q accepted on %s", v, eventSubj)
 		}
 	}
-	if r.checkReplay("webhooks.replay.rex", nats.Header{contract.HeaderReplay: {"WEBHOOK_DEAD:1"}}) != nil {
+	if r.checkReplay("webhooks.replay.app", nats.Header{contract.HeaderReplay: {"WEBHOOK_DEAD:1"}}) != nil {
 		t.Error("own replay refused")
 	}
 	if r.checkReplay(eventSubj, nats.Header{}) != nil {

@@ -22,11 +22,11 @@ import (
 
 func TestDeliverAck(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	r := start(t, e.config(t, "rex", helperHandler(t, "record", dir)), true)
+	r := start(t, e.config(t, "app", helperHandler(t, "record", dir)), true)
 	seq := e.publish(t, pub{body: []byte(`{"type":"email.received"}`), eventID: "msg_ack"})
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	recs := readRecords(t, dir)
 	if len(recs) != 1 || string(recs[0].Stdin) != `{"type":"email.received"}` || recs[0].Env["HOOKGATE_EVENT_ID"] != "msg_ack" ||
 		recs[0].Env["HOOKGATE_MESSAGE_ID"] != "resend:msg_ack" || recs[0].Env["HOOKGATE_ATTEMPT"] != "1" {
@@ -42,15 +42,15 @@ func TestDeliverAck(t *testing.T) {
 
 func TestBackoffThenDeadLetter(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "record", dir, "75"))
+	cfg := e.config(t, "app", helperHandler(t, "record", dir, "75"))
 	cfg.MaxAttempts = 4
 	cfg.Backoff = []time.Duration{300 * time.Millisecond, 600 * time.Millisecond}
 	r := start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("{}")})
 	recs := e.waitDead(t, 1)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	if got := recs[0].Header.Get(contract.HeaderDeadReason); got != contract.DeadMaxAttempts {
 		t.Errorf("reason %q", got)
 	}
@@ -79,10 +79,10 @@ func TestBackoffThenDeadLetter(t *testing.T) {
 
 func TestRetryThenAck(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit-until", "3", "69")), true)
+	e.consumer(t, "app")
+	r := start(t, e.config(t, "app", helperHandler(t, "exit-until", "3", "69")), true)
 	seq := e.publish(t, pub{body: []byte("{}")})
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	if metric(r.Relay, outcome(outcomeRetried)) != 2 || metric(r.Relay, outcome(outcomeAcked)) != 1 || len(e.deadRecords(t)) != 0 {
 		t.Error("want two retries, then an ack")
 	}
@@ -90,17 +90,17 @@ func TestRetryThenAck(t *testing.T) {
 
 func TestDeadLetterContent(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
-	r := start(t, e.config(t, "rex", helperHandler(t, "stderr", "65", "unsupported event")), true)
+	e.consumer(t, "app")
+	r := start(t, e.config(t, "app", helperHandler(t, "stderr", "65", "unsupported event")), true)
 	body := []byte(`{"type":"email.bounced","data":{"id":"x"}}`)
 	seq := e.publish(t, pub{body: body, eventID: "msg_dead", extra: map[string]string{"svix-id": "msg_dead"}})
 	recs := e.waitDead(t, 1)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	rec := recs[0]
 	if string(rec.Data) != string(body) {
 		t.Errorf("body %q", rec.Data)
 	}
-	if rec.Subject != "webhooks.dead.rex" {
+	if rec.Subject != "webhooks.dead.app" {
 		t.Errorf("subject %s", rec.Subject)
 	}
 	want := map[string]string{
@@ -109,9 +109,9 @@ func TestDeadLetterContent(t *testing.T) {
 		contract.HeaderReceivedAt: "2026-11-23T10:00:00.123Z", contract.HeaderBodySize: "42",
 		contract.HeaderDeadReason: contract.DeadHandlerRejected, contract.HeaderDeadDetail: "exit status 65",
 		contract.HeaderDeadAttempts: "1", contract.HeaderOriginalSubject: eventSubj, contract.HeaderOriginalStream: eventStream,
-		contract.HeaderOriginalConsumer: "rex", contract.HeaderOriginalMsgID: "resend:msg_dead",
+		contract.HeaderOriginalConsumer: "app", contract.HeaderOriginalMsgID: "resend:msg_dead",
 		"content-type": "application/json", "webhook-id": "msg_dead", "svix-id": "msg_dead", "x-not-passed": "kept for dead letters",
-		contract.HeaderMsgID: e.deadID(t, "rex", seq), contract.HeaderOriginalSeq: itoa(seq),
+		contract.HeaderMsgID: e.deadID(t, "app", seq), contract.HeaderOriginalSeq: itoa(seq),
 		"Nats-Expected-Stream": deadStream,
 	}
 	for k, v := range want {
@@ -138,19 +138,19 @@ func TestDeadLetterContent(t *testing.T) {
 func TestDeadLetterPublishFailureKeepsEvent(t *testing.T) {
 	e := newEnv(t)
 	dl := e.fillDeadStream(t)
-	e.consumer(t, "rex")
-	cfg := e.config(t, "rex", helperHandler(t, "exit", "65"))
+	e.consumer(t, "app")
+	cfg := e.config(t, "app", helperHandler(t, "exit", "65"))
 	r := start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("{}")})
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		return metric(r.Relay, "hookgate_relay_dead_letter_publish_failures_total") >= 2
 	}, "dead-letter publish did not fail")
-	if info := e.consumerInfo(t, "rex"); info.AckFloor.Stream >= seq {
+	if info := e.consumerInfo(t, "app"); info.AckFloor.Stream >= seq {
 		t.Fatal("event settled although its dead letter was never written")
 	}
 	e.unfillDeadStream(t, dl)
 	recs := e.waitDead(t, 2)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	if recs[1].Header.Get(contract.HeaderOriginalSeq) != itoa(seq) || metric(r.Relay, outcome(outcomeDeadLetterFailed)) < 2 {
 		t.Errorf("dead letter %v", recs[1].Header)
 	}
@@ -158,12 +158,12 @@ func TestDeadLetterPublishFailureKeepsEvent(t *testing.T) {
 
 func TestClaimCheckResolution(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	start(t, e.config(t, "rex", helperHandler(t, "record", dir)), true)
+	start(t, e.config(t, "app", helperHandler(t, "record", dir)), true)
 	body := []byte(strings.Repeat("large body ", 40000))
 	seq := e.publish(t, pub{body: body, claim: true, claimBucket: "SOMEONE_ELSES_BUCKET"})
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	recs := readRecords(t, dir)
 	if len(recs) != 1 || string(recs[0].Stdin) != string(body) {
 		t.Fatalf("handler did not get the claim-checked body")
@@ -175,9 +175,9 @@ func TestClaimCheckResolution(t *testing.T) {
 
 func TestChecksumMismatchNeverReachesHandler(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	r := start(t, e.config(t, "rex", helperHandler(t, "record", dir)), true)
+	r := start(t, e.config(t, "app", helperHandler(t, "record", dir)), true)
 	wrong := strings.Repeat("0", 64)
 	e.publish(t, pub{body: []byte("claimed body"), claim: true, sha: wrong, eventID: "claimed"})
 	e.publish(t, pub{body: []byte("inline body"), sha: wrong, eventID: "inline"})
@@ -195,14 +195,14 @@ func TestChecksumMismatchNeverReachesHandler(t *testing.T) {
 
 func TestClaimMissing(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "record", dir))
+	cfg := e.config(t, "app", helperHandler(t, "record", dir))
 	cfg.MaxAttempts = 2
 	r := start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("gone"), claimKey: "resend/gone/" + strings.Repeat("a", 64)})
 	recs := e.waitDead(t, 1)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	if recs[0].Header.Get(contract.HeaderDeadReason) != contract.DeadClaimMissing || recs[0].Header.Get(contract.HeaderDeadAttempts) != "2" ||
 		len(recs[0].Data) != 0 || recs[0].Header.Get(contract.HeaderClaimKey) == "" {
 		t.Errorf("record %v %q", recs[0].Header, recs[0].Data)
@@ -214,9 +214,9 @@ func TestClaimMissing(t *testing.T) {
 
 func TestInvalidMessage(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	start(t, e.config(t, "rex", helperHandler(t, "record", dir)), true)
+	start(t, e.config(t, "app", helperHandler(t, "record", dir)), true)
 	e.publish(t, pub{body: []byte("x"), omit: contract.HeaderSource})
 	recs := e.waitDead(t, 1)
 	if recs[0].Header.Get(contract.HeaderDeadReason) != contract.DeadInvalidMessage || string(recs[0].Data) != "x" {
@@ -250,8 +250,8 @@ func TestConfigFaultPauses(t *testing.T) {
 	for name, h := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
-			e.consumer(t, "rex")
-			r := start(t, e.config(t, "rex", h(t)), true)
+			e.consumer(t, "app")
+			r := start(t, e.config(t, "app", h(t)), true)
 			first := e.publish(t, pub{body: []byte("{}")})
 			testutil.Eventually(t, 10*time.Second, func() bool { return r.notReady() != nil }, "relay did not pause")
 			rec := httptest.NewRecorder()
@@ -261,7 +261,7 @@ func TestConfigFaultPauses(t *testing.T) {
 			}
 			e.publish(t, pub{body: []byte("{}")})
 			time.Sleep(500 * time.Millisecond)
-			info := e.consumerInfo(t, "rex")
+			info := e.consumerInfo(t, "app")
 			if info.AckFloor.Stream >= first || info.Delivered.Stream != first || len(e.deadRecords(t)) != 0 {
 				t.Errorf("paused relay settled or fetched: %+v", info)
 			}
@@ -274,15 +274,15 @@ func TestConfigFaultPauses(t *testing.T) {
 
 func TestDrainFinishesInFlight(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "sleep", "1s", dir))
+	cfg := e.config(t, "app", helperHandler(t, "sleep", "1s", dir))
 	cfg.DrainTimeout = 10 * time.Second
 	r := start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("{}")})
 	testutil.Eventually(t, 10*time.Second, func() bool { return len(readRecords(t, dir)) == 1 }, "handler did not start")
 	r.stop()
-	if info := e.consumerInfo(t, "rex"); info.AckFloor.Stream < seq {
+	if info := e.consumerInfo(t, "app"); info.AckFloor.Stream < seq {
 		t.Errorf("not acked after drain: %+v", info.AckFloor)
 	}
 	if metric(r.Relay, outcome(outcomeAcked)) != 1 {
@@ -292,9 +292,9 @@ func TestDrainFinishesInFlight(t *testing.T) {
 
 func TestDrainTimeoutNaksAndRedelivers(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "sleep", "1m", dir))
+	cfg := e.config(t, "app", helperHandler(t, "sleep", "1m", dir))
 	cfg.DrainTimeout = 300 * time.Millisecond
 	r := start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("{}")})
@@ -308,8 +308,8 @@ func TestDrainTimeoutNaksAndRedelivers(t *testing.T) {
 		t.Error("not naked on shutdown")
 	}
 	next := t.TempDir()
-	start(t, e.config(t, "rex", helperHandler(t, "record", next)), true)
-	e.waitSettled(t, "rex", seq)
+	start(t, e.config(t, "app", helperHandler(t, "record", next)), true)
+	e.waitSettled(t, "app", seq)
 	recs := readRecords(t, next)
 	if len(recs) != 1 || recs[0].Env["HOOKGATE_ATTEMPT"] != "2" {
 		t.Errorf("redelivery %+v", recs)
@@ -318,7 +318,7 @@ func TestDrainTimeoutNaksAndRedelivers(t *testing.T) {
 
 func TestTwoRelaysShareConsumer(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	var mu sync.Mutex
 	seen := map[string]int{}
 	var byRelay [2]atomic.Int64
@@ -334,7 +334,7 @@ func TestTwoRelaysShareConsumer(t *testing.T) {
 	for i := range 2 {
 		srv := httptest.NewServer(handler(i))
 		t.Cleanup(srv.Close)
-		cfg := e.config(t, "rex", Handler{HTTP: &HTTPHandler{URL: srv.URL, Timeout: 5 * time.Second}})
+		cfg := e.config(t, "app", Handler{HTTP: &HTTPHandler{URL: srv.URL, Timeout: 5 * time.Second}})
 		cfg.Concurrency = 3
 		start(t, cfg, true)
 	}
@@ -343,7 +343,7 @@ func TestTwoRelaysShareConsumer(t *testing.T) {
 	for i := range n {
 		last = e.publish(t, pub{body: []byte("{}"), eventID: "evt_" + itoa(uint64(i))})
 	}
-	e.waitSettled(t, "rex", last)
+	e.waitSettled(t, "app", last)
 	mu.Lock()
 	defer mu.Unlock()
 	if len(seen) != n {
@@ -379,8 +379,8 @@ func TestReadinessChecks(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
-			e.consumer(t, "rex", tc.modify)
-			cfg := e.config(t, "rex", helperHandler(t, "exit", "0"))
+			e.consumer(t, "app", tc.modify)
+			cfg := e.config(t, "app", helperHandler(t, "exit", "0"))
 			cfg.Concurrency = 2
 			r := start(t, cfg, false)
 			testutil.Eventually(t, 10*time.Second, func() bool {
@@ -389,26 +389,26 @@ func TestReadinessChecks(t *testing.T) {
 			}, "relay ready with a bad consumer")
 			seq := e.publish(t, pub{body: []byte("{}")})
 			time.Sleep(300 * time.Millisecond)
-			if info := e.consumerInfo(t, "rex"); info.Delivered.Stream >= seq {
+			if info := e.consumerInfo(t, "app"); info.Delivered.Stream >= seq {
 				t.Error("not-ready relay fetched")
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			if err := e.js.DeleteConsumer(ctx, eventStream, "rex"); err != nil {
+			if err := e.js.DeleteConsumer(ctx, eventStream, "app"); err != nil {
 				t.Fatal(err)
 			}
-			e.consumer(t, "rex")
+			e.consumer(t, "app")
 			r.trigger()
 			testutil.Eventually(t, 10*time.Second, func() bool { return r.notReady() == nil }, "relay not ready after the fix")
-			e.waitSettled(t, "rex", seq)
+			e.waitSettled(t, "app", seq)
 		})
 	}
 }
 
 func TestReadinessMissingStreams(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
-	cfg := e.config(t, "rex", helperHandler(t, "exit", "0"))
+	e.consumer(t, "app")
+	cfg := e.config(t, "app", helperHandler(t, "exit", "0"))
 	cfg.DeadLetter.Stream = "NO_SUCH_STREAM"
 	r := start(t, cfg, false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
@@ -421,15 +421,15 @@ func itoa(n uint64) string { return strconv.FormatUint(n, 10) }
 
 func TestInProgressKeepsLongHandlerAlive(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex", func(c *jetstream.ConsumerConfig) { c.AckWait = time.Second })
+	e.consumer(t, "app", func(c *jetstream.ConsumerConfig) { c.AckWait = time.Second })
 	dir := t.TempDir()
-	r := start(t, e.config(t, "rex", helperHandler(t, "sleep", "2500ms", dir)), true)
+	r := start(t, e.config(t, "app", helperHandler(t, "sleep", "2500ms", dir)), true)
 	seq := e.publish(t, pub{body: []byte("{}")})
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	if n := len(readRecords(t, dir)); n != 1 {
 		t.Errorf("handler ran %d times; the message was redelivered while in progress", n)
 	}
-	if info := e.consumerInfo(t, "rex"); info.NumRedelivered != 0 || metric(r.Relay, outcome(outcomeAcked)) != 1 {
+	if info := e.consumerInfo(t, "app"); info.NumRedelivered != 0 || metric(r.Relay, outcome(outcomeAcked)) != 1 {
 		t.Errorf("redelivered %d", info.NumRedelivered)
 	}
 }
@@ -452,14 +452,14 @@ func checkMismatchRecord(t *testing.T, rec *jetstream.RawStreamMsg) {
 
 func TestReadinessDeadLetterRetention(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := e.js.DeleteStream(ctx, deadStream); err != nil {
 		t.Fatal(err)
 	}
 	testutil.CreateStream(t, e.js, jetstream.StreamConfig{Name: deadStream, Subjects: []string{"webhooks.dead.>"}, Retention: jetstream.InterestPolicy})
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), false)
+	r := start(t, e.config(t, "app", helperHandler(t, "exit", "65")), false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		err := r.notReady()
 		return err != nil && strings.Contains(err.Error(), "want limits")
@@ -470,9 +470,9 @@ func TestReadinessDeadLetterRetention(t *testing.T) {
 // no handler beyond those already running.
 func TestPauseStopsBatch(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "record", dir, "127"))
+	cfg := e.config(t, "app", helperHandler(t, "record", dir, "127"))
 	cfg.Concurrency = 3
 	for range 10 {
 		e.publish(t, pub{body: []byte("{}")})
@@ -483,7 +483,7 @@ func TestPauseStopsBatch(t *testing.T) {
 	if n := len(readRecords(t, dir)); n < 1 || n > cfg.Concurrency {
 		t.Errorf("%d handlers ran, want 1-%d", n, cfg.Concurrency)
 	}
-	if info := e.consumerInfo(t, "rex"); info.AckFloor.Stream != 0 || len(e.deadRecords(t)) != 0 {
+	if info := e.consumerInfo(t, "app"); info.AckFloor.Stream != 0 || len(e.deadRecords(t)) != 0 {
 		t.Errorf("events settled while paused: %+v", info.AckFloor)
 	}
 }
@@ -493,13 +493,13 @@ func TestPauseStopsBatch(t *testing.T) {
 func TestFailedDeadLetterRerunsHandler(t *testing.T) {
 	e := newEnv(t)
 	e.fillDeadStream(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "record-until", dir, "3", "75"))
+	cfg := e.config(t, "app", helperHandler(t, "record-until", dir, "3", "75"))
 	cfg.MaxAttempts = 2
 	r := start(t, cfg, true)
 	seq := e.publish(t, pub{body: []byte("{}")})
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	if n := len(readRecords(t, dir)); n != 3 {
 		t.Errorf("handler ran %d times, want 3", n)
 	}
@@ -515,11 +515,11 @@ func TestFailedDeadLetterRerunsHandler(t *testing.T) {
 // redelivery runs the handler, which now succeeds; the earlier record stays (a replay of it is idempotent).
 func TestDeadLetterAlreadyWritten(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	seq := e.publish(t, pub{body: []byte("{}")})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cons, err := e.js.Consumer(ctx, eventStream, "rex")
+	cons, err := e.js.Consumer(ctx, eventStream, "app")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,16 +527,16 @@ func TestDeadLetterAlreadyWritten(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.js.PublishMsg(ctx, &nats.Msg{Subject: "webhooks.dead.rex", Header: nats.Header{contract.HeaderDeadReason: {contract.DeadMaxAttempts}}},
-		jetstream.WithMsgID(e.deadID(t, "rex", seq))); err != nil {
+	if _, err := e.js.PublishMsg(ctx, &nats.Msg{Subject: "webhooks.dead.app", Header: nats.Header{contract.HeaderDeadReason: {contract.DeadMaxAttempts}}},
+		jetstream.WithMsgID(e.deadID(t, "app", seq))); err != nil {
 		t.Fatal(err)
 	}
 	_ = msg.Nak()
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "record", dir))
+	cfg := e.config(t, "app", helperHandler(t, "record", dir))
 	cfg.MaxAttempts = 1
 	start(t, cfg, true)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	recs := readRecords(t, dir)
 	if len(recs) != 1 || recs[0].Env["HOOKGATE_ATTEMPT"] != "2" || len(e.deadRecords(t)) != 1 {
 		t.Errorf("handler runs %d, dead letters %d", len(recs), len(e.deadRecords(t)))
@@ -547,9 +547,9 @@ func TestDeadLetterAlreadyWritten(t *testing.T) {
 // pull about to start is not made.
 func TestNoHandlerAfterPause(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	r, err := New(e.config(t, "rex", helperHandler(t, "record", dir)), testLogger(t))
+	r, err := New(e.config(t, "app", helperHandler(t, "record", dir)), testLogger(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +558,7 @@ func TestNoHandlerAfterPause(t *testing.T) {
 	e.publish(t, pub{body: []byte("{}")})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cons, err := e.js.Consumer(ctx, eventStream, "rex")
+	cons, err := e.js.Consumer(ctx, eventStream, "app")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -567,7 +567,7 @@ func TestNoHandlerAfterPause(t *testing.T) {
 	if got, ferr := r.fetch(ctx, ctx, cons, 1, slots); got != 0 || ferr != nil {
 		t.Fatalf("paused relay pulled %d (%v)", got, ferr)
 	}
-	if info := e.consumerInfo(t, "rex"); info.Delivered.Stream != 0 {
+	if info := e.consumerInfo(t, "app"); info.Delivered.Stream != 0 {
 		t.Fatalf("paused relay pulled: %+v", info.Delivered)
 	}
 	msg, err := cons.Next()
@@ -585,13 +585,13 @@ func TestNoHandlerAfterPause(t *testing.T) {
 
 func TestReadinessDeadLetterNoAck(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if _, err := e.js.UpdateStream(ctx, jetstream.StreamConfig{Name: deadStream, Subjects: []string{"webhooks.dead.>"}, AllowDirect: true, NoAck: true, Discard: jetstream.DiscardNew}); err != nil {
 		t.Fatal(err)
 	}
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), false)
+	r := start(t, e.config(t, "app", helperHandler(t, "exit", "65")), false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		err := r.notReady()
 		return err != nil && strings.Contains(err.Error(), "no_ack")
@@ -627,10 +627,10 @@ func TestSettlementThroughBroker(t *testing.T) {
 	for name, h := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
-			e.consumer(t, "rex")
-			r := start(t, e.config(t, "rex", h(t)), true)
+			e.consumer(t, "app")
+			r := start(t, e.config(t, "app", h(t)), true)
 			seq := e.publish(t, pub{body: []byte("{}")})
-			e.waitSettled(t, "rex", seq)
+			e.waitSettled(t, "app", seq)
 			if metric(r.Relay, outcome(outcomeRetried)) != 1 || metric(r.Relay, outcome(outcomeAcked)) != 1 || len(e.deadRecords(t)) != 0 {
 				t.Errorf("retried %v, acked %v", metric(r.Relay, outcome(outcomeRetried)), metric(r.Relay, outcome(outcomeAcked)))
 			}
@@ -640,7 +640,7 @@ func TestSettlementThroughBroker(t *testing.T) {
 
 func TestReadinessClaimTTL(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := e.js.DeleteObjectStore(ctx, claimBucket); err != nil {
@@ -656,7 +656,7 @@ func TestReadinessClaimTTL(t *testing.T) {
 	if _, err := e.js.UpdateStream(ctx, sc); err != nil {
 		t.Fatal(err)
 	}
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "0")), false)
+	r := start(t, e.config(t, "app", helperHandler(t, "exit", "0")), false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		err := r.notReady()
 		return err != nil && strings.Contains(err.Error(), "bucket TTL")
@@ -686,9 +686,9 @@ func (s pausingStore) Get(ctx context.Context, _ claimcheck.Ref) ([]byte, error)
 // dead-lettered.
 func TestNoDeadLetterWhilePaused(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "record", dir))
+	cfg := e.config(t, "app", helperHandler(t, "record", dir))
 	cfg.MaxAttempts = 1
 	cfg.DrainTimeout = 200 * time.Millisecond
 	r, err := New(cfg, testLogger(t))
@@ -700,7 +700,7 @@ func TestNoDeadLetterWhilePaused(t *testing.T) {
 	seq := e.publish(t, pub{body: []byte("claimed"), claimKey: "resend/x/" + strings.Repeat("a", 64)})
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	cons, err := e.js.Consumer(ctx, eventStream, "rex")
+	cons, err := e.js.Consumer(ctx, eventStream, "app")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -715,21 +715,21 @@ func TestNoDeadLetterWhilePaused(t *testing.T) {
 	if metric(r, outcome(outcomePaused)) != 1 {
 		t.Error("not naked as paused")
 	}
-	if info := e.consumerInfo(t, "rex"); info.AckFloor.Stream >= seq {
+	if info := e.consumerInfo(t, "app"); info.AckFloor.Stream >= seq {
 		t.Errorf("settled while paused: %+v", info.AckFloor)
 	}
 }
 
 func TestReadinessClaimDurability(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := e.js.DeleteObjectStore(ctx, claimBucket); err != nil {
 		t.Fatal(err)
 	}
 	testutil.CreateBucket(t, e.js, jetstream.ObjectStoreConfig{Bucket: claimBucket, Storage: jetstream.MemoryStorage})
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "0")), false)
+	r := start(t, e.config(t, "app", helperHandler(t, "exit", "0")), false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		err := r.notReady()
 		return err != nil && strings.Contains(err.Error(), "less durably")
@@ -748,7 +748,7 @@ func TestReadinessDeadLetterLimits(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
-			e.consumer(t, "rex")
+			e.consumer(t, "app")
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			cfg := jetstream.StreamConfig{Name: deadStream, Subjects: []string{"webhooks.dead.>"}, AllowDirect: true, Discard: jetstream.DiscardNew}
@@ -756,7 +756,7 @@ func TestReadinessDeadLetterLimits(t *testing.T) {
 			if _, err := e.js.UpdateStream(ctx, cfg); err != nil {
 				t.Fatal(err)
 			}
-			r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), false)
+			r := start(t, e.config(t, "app", helperHandler(t, "exit", "65")), false)
 			testutil.Eventually(t, 10*time.Second, func() bool {
 				err := r.notReady()
 				return err != nil && strings.Contains(err.Error(), tc.want)
@@ -775,13 +775,13 @@ func TestDeadLetterTooLarge(t *testing.T) {
 	if _, err := e.js.UpdateStream(ctx, jetstream.StreamConfig{Name: deadStream, Subjects: []string{"webhooks.dead.>"}, AllowDirect: true, Discard: jetstream.DiscardNew, MaxMsgSize: 2048}); err != nil {
 		t.Fatal(err)
 	}
-	e.consumer(t, "rex")
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), true)
+	e.consumer(t, "app")
+	r := start(t, e.config(t, "app", helperHandler(t, "exit", "65")), true)
 	seq := e.publish(t, pub{body: []byte(strings.Repeat("x", 10000)), claim: true})
 	testutil.Eventually(t, 10*time.Second, func() bool {
 		return metric(r.Relay, "hookgate_relay_dead_letter_too_large_total") >= 1
 	}, "oversized dead letter not counted")
-	if info := e.consumerInfo(t, "rex"); info.AckFloor.Stream >= seq || len(e.deadRecords(t)) != 0 {
+	if info := e.consumerInfo(t, "app"); info.AckFloor.Stream >= seq || len(e.deadRecords(t)) != 0 {
 		t.Error("oversized event settled")
 	}
 }
@@ -790,15 +790,15 @@ func TestDeadLetterTooLarge(t *testing.T) {
 // header limit are left out and the record says so; the contract headers and metadata stay.
 func TestDeadLetterDropsOversizedHeaders(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
-	r := start(t, e.config(t, "rex", helperHandler(t, "exit", "65")), true)
+	e.consumer(t, "app")
+	r := start(t, e.config(t, "app", helperHandler(t, "exit", "65")), true)
 	extra := map[string]string{}
 	for i := range 7 {
 		extra["x-big-"+itoa(uint64(i))] = strings.Repeat("v", 9150)
 	}
 	seq := e.publish(t, pub{body: []byte("{}"), eventID: "big_headers", extra: extra})
 	recs := e.waitDead(t, 1)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	h := recs[0].Header
 	if h.Get(contract.HeaderDeadHeadersDropped) != "true" || h.Get("x-big-0") != "" || h.Get("webhook-id") != "" {
 		t.Errorf("application headers not dropped: %v", h.Get(contract.HeaderDeadHeadersDropped))
@@ -830,7 +830,7 @@ func TestReadinessRejectsRewritingStreams(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
-			e.consumer(t, "rex")
+			e.consumer(t, "app")
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			s, err := e.js.Stream(ctx, tc.stream)
@@ -842,7 +842,7 @@ func TestReadinessRejectsRewritingStreams(t *testing.T) {
 			if _, err := e.js.UpdateStream(ctx, cfg); err != nil {
 				t.Fatal(err)
 			}
-			r := start(t, e.config(t, "rex", helperHandler(t, "exit", "0")), false)
+			r := start(t, e.config(t, "app", helperHandler(t, "exit", "0")), false)
 			testutil.Eventually(t, 10*time.Second, func() bool {
 				err := r.notReady()
 				return err != nil && strings.Contains(err.Error(), tc.want)
