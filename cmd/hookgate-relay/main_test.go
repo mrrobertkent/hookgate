@@ -23,8 +23,8 @@ func writeConfig(t *testing.T, handlerPath string) string {
 	cfg := `
 connection: {nats: {urls: ["nats://127.0.0.1:4222"], none: true}}
 stream: WEBHOOK_EVENTS
-consumer: rex
-filter_subjects: [webhooks.events.resend, webhooks.replay.rex]
+consumer: app
+filter_subjects: [webhooks.events.resend, webhooks.replay.app]
 dead_letter: {stream: WEBHOOK_DEAD}
 handler:
   command:
@@ -53,7 +53,7 @@ func TestValidate(t *testing.T) {
 	}
 	file := writeConfig(t, exe)
 	t.Setenv("RELAY_MAIN_TEST_TOKEN", "x")
-	if code, out, errOut := runCmd("validate", "-config", file); code != 0 || !strings.Contains(out, "ok: consumer rex") {
+	if code, out, errOut := runCmd("validate", "-config", file); code != 0 || !strings.Contains(out, "ok: consumer app") {
 		t.Errorf("validate %d %q %q", code, out, errOut)
 	}
 	t.Setenv("RELAY_MAIN_TEST_TOKEN", "")

@@ -73,11 +73,11 @@ func FuzzFilterSubject(f *testing.F) {
 // FuzzReplayIsolation checks that a filter the relay accepts besides its own replay subject never matches any
 // relay's replay subject, whatever prefix and consumer it has.
 func FuzzReplayIsolation(f *testing.F) {
-	f.Add("webhooks.events.resend", "webhooks", "rex")
+	f.Add("webhooks.events.resend", "webhooks", "app")
 	f.Add("webhooks.replay.*", "custom", "b")
 	f.Add("*.events.x", "a.b", "c")
-	f.Add("webhooks.events.*", "webhooks", "rex")
-	f.Add("webhooks.*.*", "custom", "rex")
+	f.Add("webhooks.events.*", "webhooks", "app")
+	f.Add("webhooks.*.*", "custom", "app")
 	f.Add("a.*.>", "a.b.c", "d")
 	f.Fuzz(func(t *testing.T, filter, prefix, consumer string) {
 		subject := prefix + "." + replayToken + "." + consumer

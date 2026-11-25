@@ -22,15 +22,15 @@ import (
 	"github.com/mrrobertkent/hookgate/internal/testutil"
 )
 
-// relayPermissions are the exact grants docs/relay.md lists for consumer rex.
+// relayPermissions are the exact grants docs/relay.md lists for consumer app.
 const relayPermissions = `{
   publish: { allow: [
     "$JS.API.STREAM.INFO.WEBHOOK_EVENTS",
-    "$JS.API.CONSUMER.INFO.WEBHOOK_EVENTS.rex",
-    "$JS.API.CONSUMER.MSG.NEXT.WEBHOOK_EVENTS.rex",
-    "$JS.ACK.WEBHOOK_EVENTS.rex.>",
+    "$JS.API.CONSUMER.INFO.WEBHOOK_EVENTS.app",
+    "$JS.API.CONSUMER.MSG.NEXT.WEBHOOK_EVENTS.app",
+    "$JS.ACK.WEBHOOK_EVENTS.app.>",
     "$JS.API.STREAM.INFO.WEBHOOK_DEAD",
-    "webhooks.dead.rex",
+    "webhooks.dead.app",
     "$JS.API.STREAM.INFO.OBJ_WEBHOOK_CLAIMS",
     "$JS.API.DIRECT.GET.OBJ_WEBHOOK_CLAIMS.$O.WEBHOOK_CLAIMS.M.>",
     "$JS.API.CONSUMER.CREATE.OBJ_WEBHOOK_CLAIMS.*.$O.WEBHOOK_CLAIMS.C.*",
@@ -38,8 +38,8 @@ const relayPermissions = `{
     "$JS.FC.OBJ_WEBHOOK_CLAIMS.>"
   ] }
   subscribe: { allow: [
-    "_INBOX.relay-rex.>",
-    "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.WEBHOOK_EVENTS.rex"
+    "_INBOX.relay-app.>",
+    "$JS.EVENT.ADVISORY.CONSUMER.MAX_DELIVERIES.WEBHOOK_EVENTS.app"
   ] }
 }`
 
@@ -100,7 +100,7 @@ accounts {
 	}
 	e := setupEnv(t, srv, opt)
 	e.capEventStream(t, 64<<10)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	e.consumer(t, "other")
 
 	handler := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -109,15 +109,15 @@ accounts {
 		}
 	}))
 	t.Cleanup(handler.Close)
-	cfg := e.config(t, "rex", Handler{HTTP: &HTTPHandler{URL: handler.URL, Timeout: 5 * time.Second}})
+	cfg := e.config(t, "app", Handler{HTTP: &HTTPHandler{URL: handler.URL, Timeout: 5 * time.Second}})
 	cfg.Connection.NATS = config.NATSConnection{URLs: []string{srv.ClientURL()}, NKeySeed: &config.SecretRef{File: relayID.seedFile}}
-	cfg.Connection.NATS.ApplyDefaults("relay-rex")
+	cfg.Connection.NATS.ApplyDefaults("relay-app")
 	relay := start(t, cfg, true)
 
 	e.publish(t, pub{body: []byte("inline"), eventID: "inline"})
 	e.publish(t, pub{body: []byte(strings.Repeat("claimed ", 50000)), claim: true, eventID: "claimed"})
 	last := e.publish(t, pub{body: []byte("rejected"), eventID: "reject"})
-	e.waitSettled(t, "rex", last)
+	e.waitSettled(t, "app", last)
 	recs := e.waitDead(t, 2)
 	if len(recs) != 2 || len(recs[0].Data) != 400000 {
 		t.Fatalf("dead letters %d, first body %d bytes", len(recs), len(recs[0].Data))
@@ -133,7 +133,7 @@ accounts {
 			if again := replayAs(t, &rcfg, rec.Sequence); !again.Duplicate || again.Sequence != res.Sequence {
 				t.Errorf("repeated replay of %d: %+v", rec.Sequence, again)
 			}
-			e.waitSettled(t, "rex", res.Sequence)
+			e.waitSettled(t, "app", res.Sequence)
 		}
 		if n := metric(relay.Relay, outcome(outcomeAcked)); n != 3 {
 			t.Errorf("acked %v, want 3 (inline, two replays)", n)
@@ -163,7 +163,7 @@ func checkDenied(t *testing.T, cfg *Config) {
 	}
 	probe("other consumer", func(ctx context.Context) error { _, err := js.Consumer(ctx, eventStream, "other"); return err })
 	probe("delete consumer", func(ctx context.Context) error {
-		return js.DeleteConsumer(ctx, eventStream, "rex")
+		return js.DeleteConsumer(ctx, eventStream, "app")
 	})
 	probe("stream purge", func(context.Context) error {
 		_, err := nc.Request("$JS.API.STREAM.PURGE."+eventStream, nil, 300*time.Millisecond)

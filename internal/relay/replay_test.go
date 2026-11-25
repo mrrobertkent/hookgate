@@ -19,51 +19,51 @@ import (
 
 func TestReplayReachesOnlyFailedConsumer(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	e.consumer(t, "other")
-	var rexAccept atomic.Bool
-	var rexHandled, otherHandled atomic.Int64
+	var appAccept atomic.Bool
+	var appHandled, otherHandled atomic.Int64
 	var replayHeader atomic.Value
-	rex := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !rexAccept.Load() {
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !appAccept.Load() {
 			w.WriteHeader(http.StatusUnprocessableEntity)
 			return
 		}
 		replayHeader.Store(r.Header.Get(contract.HeaderReplay))
-		rexHandled.Add(1)
+		appHandled.Add(1)
 	}))
-	t.Cleanup(rex.Close)
+	t.Cleanup(app.Close)
 	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { otherHandled.Add(1) }))
 	t.Cleanup(other.Close)
-	start(t, e.config(t, "rex", Handler{HTTP: &HTTPHandler{URL: rex.URL, Timeout: 5 * time.Second}}), true)
+	start(t, e.config(t, "app", Handler{HTTP: &HTTPHandler{URL: app.URL, Timeout: 5 * time.Second}}), true)
 	start(t, e.config(t, "other", Handler{HTTP: &HTTPHandler{URL: other.URL, Timeout: 5 * time.Second}}), true)
 
 	seq := e.publish(t, pub{body: []byte(`{"n":1}`), eventID: "msg_replay"})
 	recs := e.waitDead(t, 1)
-	e.waitSettled(t, "rex", seq)
+	e.waitSettled(t, "app", seq)
 	e.waitSettled(t, "other", seq)
 	if recs[0].Header.Get(contract.HeaderDeadReason) != contract.DeadHandlerRejected || recs[0].Header.Get(contract.HeaderDeadDetail) != "status 422" {
 		t.Fatalf("dead letter %v", recs[0].Header)
 	}
 
-	rexAccept.Store(true)
-	rp := NewReplayer(e.config(t, "rex", helperHandler(t, "exit", "0")), e.js)
+	appAccept.Store(true)
+	rp := NewReplayer(e.config(t, "app", helperHandler(t, "exit", "0")), e.js)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	res, err := rp.Replay(ctx, recs[0].Sequence)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.Subject != "webhooks.replay.rex" || res.Stream != eventStream || res.Duplicate {
+	if res.Subject != "webhooks.replay.app" || res.Stream != eventStream || res.Duplicate {
 		t.Errorf("replayed %+v", res)
 	}
-	e.waitSettled(t, "rex", res.Sequence)
+	e.waitSettled(t, "app", res.Sequence)
 	time.Sleep(300 * time.Millisecond)
 	if info := e.consumerInfo(t, "other"); info.NumPending != 0 || info.NumAckPending != 0 {
 		t.Errorf("other consumer has work: %+v", info)
 	}
-	if rexHandled.Load() != 1 || otherHandled.Load() != 1 {
-		t.Errorf("rex handled %d, other %d", rexHandled.Load(), otherHandled.Load())
+	if appHandled.Load() != 1 || otherHandled.Load() != 1 {
+		t.Errorf("app handled %d, other %d", appHandled.Load(), otherHandled.Load())
 	}
 	if got, _ := replayHeader.Load().(string); got != deadStream+":1" {
 		t.Errorf("replay marker %q", got)
@@ -79,9 +79,9 @@ func TestReplayReachesOnlyFailedConsumer(t *testing.T) {
 
 func TestReplayWithoutBody(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	dir := t.TempDir()
-	cfg := e.config(t, "rex", helperHandler(t, "record", dir))
+	cfg := e.config(t, "app", helperHandler(t, "record", dir))
 	cfg.MaxAttempts = 1
 	start(t, cfg, true)
 	e.publish(t, pub{body: []byte("late body"), claimKey: "resend/late/x", eventID: "late"})
@@ -130,12 +130,12 @@ func checkReplayed(t *testing.T, m *jetstream.RawStreamMsg) {
 // replayed inline; one byte less of room needs a claim check.
 func TestReplaySizeExact(t *testing.T) {
 	e := newEnv(t)
-	cfg := e.config(t, "rex", helperHandler(t, "exit", "0"))
+	cfg := e.config(t, "app", helperHandler(t, "exit", "0"))
 	cfg.ClaimCheck = nil
 	rp := NewReplayer(cfg, e.js)
 	h := nats.Header{"x-note": {strings.Repeat("n", 700)}}
 	h.Set(contract.HeaderSource, "resend")
-	msg := &nats.Msg{Subject: "webhooks.replay.rex", Header: h, Data: []byte(strings.Repeat("b", 1000))}
+	msg := &nats.Msg{Subject: "webhooks.replay.app", Header: h, Data: []byte(strings.Repeat("b", 1000))}
 	size := publishedSize(msg, eventStream, "replay:WEBHOOK_DEAD:1")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -155,11 +155,11 @@ func TestReplaySizeExact(t *testing.T) {
 // TestReplayRefusesRewritingStream: a replay is not published into an event stream that could rewrite its subject.
 func TestReplayRefusesRewritingStream(t *testing.T) {
 	e := newEnv(t)
-	e.consumer(t, "rex")
+	e.consumer(t, "app")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if _, err := e.js.PublishMsg(ctx, &nats.Msg{Subject: "webhooks.dead.rex", Data: []byte("{}"), Header: nats.Header{
-		contract.HeaderDeadReason: {contract.DeadHandlerRejected}, contract.HeaderOriginalConsumer: {"rex"},
+	if _, err := e.js.PublishMsg(ctx, &nats.Msg{Subject: "webhooks.dead.app", Data: []byte("{}"), Header: nats.Header{
+		contract.HeaderDeadReason: {contract.DeadHandlerRejected}, contract.HeaderOriginalConsumer: {"app"},
 		contract.HeaderOriginalStream: {eventStream}, contract.HeaderSource: {"resend"},
 	}}); err != nil {
 		t.Fatal(err)
@@ -169,7 +169,7 @@ func TestReplayRefusesRewritingStream(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := e.streamState(t)
-	if _, err := NewReplayer(e.config(t, "rex", helperHandler(t, "exit", "0")), e.js).Replay(ctx, 1); err == nil || !strings.Contains(err.Error(), "subject transform") {
+	if _, err := NewReplayer(e.config(t, "app", helperHandler(t, "exit", "0")), e.js).Replay(ctx, 1); err == nil || !strings.Contains(err.Error(), "subject transform") {
 		t.Errorf("replay into a rewriting stream: %v", err)
 	}
 	if after := e.streamState(t); after != before {

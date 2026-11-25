@@ -23,7 +23,7 @@ func TestUnusableCredentialsAtStart(t *testing.T) {
 	if err := os.WriteFile(bad, []byte("not a seed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := e.config(t, "rex", helperHandler(t, "exit", "0"))
+	cfg := e.config(t, "app", helperHandler(t, "exit", "0"))
 	cfg.Connection.NATS = config.NATSConnection{URLs: []string{e.srv.ClientURL()}, NKeySeed: &config.SecretRef{File: bad}}
 	r, err := New(cfg, testLogger(t))
 	if err != nil {
@@ -49,9 +49,9 @@ func TestRejectedCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := &Config{
-		AdminListen: "127.0.0.1:0", Stream: eventStream, Consumer: "rex",
+		AdminListen: "127.0.0.1:0", Stream: eventStream, Consumer: "app",
 		Connection:     Connection{NATS: config.NATSConnection{URLs: []string{srv.ClientURL()}, NKeySeed: &config.SecretRef{File: file}}},
-		FilterSubjects: []string{eventSubj, "webhooks.replay.rex"}, DeadLetter: DeadLetter{Stream: deadStream},
+		FilterSubjects: []string{eventSubj, "webhooks.replay.app"}, DeadLetter: DeadLetter{Stream: deadStream},
 		Handler: helperHandler(t, "exit", "0"),
 	}
 	cfg.applyDefaults()

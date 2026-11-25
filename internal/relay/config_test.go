@@ -9,8 +9,8 @@ import (
 const minimalConfig = `
 connection: {nats: {urls: ["nats://127.0.0.1:4222"], none: true}}
 stream: WEBHOOK_EVENTS
-consumer: rex
-filter_subjects: [webhooks.events.resend, webhooks.replay.rex]
+consumer: app
+filter_subjects: [webhooks.events.resend, webhooks.replay.app]
 dead_letter: {stream: WEBHOOK_DEAD}
 handler:
   command: {path: /usr/local/bin/handler}
@@ -29,10 +29,10 @@ func TestConfigDefaults(t *testing.T) {
 	if len(c.Backoff) != 5 || c.Backoff[0] != 10*time.Second || c.Backoff[4] != time.Hour {
 		t.Errorf("backoff %v", c.Backoff)
 	}
-	if c.Connection.NATS.InboxPrefix != "_INBOX.relay-rex" {
+	if c.Connection.NATS.InboxPrefix != "_INBOX.relay-app" {
 		t.Errorf("inbox prefix %q", c.Connection.NATS.InboxPrefix)
 	}
-	if c.deadSubject() != "webhooks.dead.rex" || c.replaySubject() != "webhooks.replay.rex" {
+	if c.deadSubject() != "webhooks.dead.app" || c.replaySubject() != "webhooks.replay.app" {
 		t.Errorf("subjects %s %s", c.deadSubject(), c.replaySubject())
 	}
 }
@@ -54,28 +54,28 @@ func TestConfigErrors(t *testing.T) {
 	}{
 		{"unknown key", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nnope: 1", "field nope not found"},
 		{"no stream", "stream: WEBHOOK_EVENTS", "", "stream \"\""},
-		{"dotted consumer", "consumer: rex", "consumer: re.x", "consumer \"re.x\""},
+		{"dotted consumer", "consumer: app", "consumer: ap.p", "consumer \"ap.p\""},
 		{"colon in stream", "stream: WEBHOOK_EVENTS", "stream: \"A:B\"", "stream \"A:B\""},
-		{"colon in consumer", "consumer: rex", "consumer: \"b:rex\"", "consumer \"b:rex\""},
-		{"static replay subject", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: webhooks.replay.rex", "must be <prefix>.replay.{consumer}"},
-		{"custom prefix, default wildcard", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"custom.replay.{consumer}\"", "must list custom.replay.rex"},
-		{"custom prefix catching others", "webhooks.replay.rex]", "custom.replay.rex, webhooks.replay.*]\nreplay_subject: \"custom.replay.{consumer}\"", "could match a replay subject"},
+		{"colon in consumer", "consumer: app", "consumer: \"b:app\"", "consumer \"b:app\""},
+		{"static replay subject", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: webhooks.replay.app", "must be <prefix>.replay.{consumer}"},
+		{"custom prefix, default wildcard", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"custom.replay.{consumer}\"", "must list custom.replay.app"},
+		{"custom prefix catching others", "webhooks.replay.app]", "custom.replay.app, webhooks.replay.*]\nreplay_subject: \"custom.replay.{consumer}\"", "could match a replay subject"},
 		{"wildcard event catch-all", "webhooks.events.resend,", "webhooks.events.>,", "could match a replay subject"},
-		{"custom prefix, other replay literally", "webhooks.replay.rex]", "custom.replay.rex, webhooks.replay.b]\nreplay_subject: \"custom.replay.{consumer}\"", "could match a replay subject"},
+		{"custom prefix, other replay literally", "webhooks.replay.app]", "custom.replay.app, webhooks.replay.b]\nreplay_subject: \"custom.replay.{consumer}\"", "could match a replay subject"},
 		{"wildcard before the last token", "webhooks.events.resend,", "\"webhooks.*.resend\",", "could match a replay subject"},
 		{"replay token in prefix", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"replay.x.replay.{consumer}\"", "must be <prefix>.replay.{consumer}"},
-		{"replay wildcard", "webhooks.replay.rex]", "webhooks.replay.*]", "could match a replay subject"},
-		{"other consumer's replay", "webhooks.replay.rex]", "webhooks.replay.rex, webhooks.replay.b]", "could match a replay subject"},
-		{"other replay by token", "webhooks.replay.rex]", "webhooks.replay.rex, \"*.replay.b\"]", "could match a replay subject"},
+		{"replay wildcard", "webhooks.replay.app]", "webhooks.replay.*]", "could match a replay subject"},
+		{"other consumer's replay", "webhooks.replay.app]", "webhooks.replay.app, webhooks.replay.b]", "could match a replay subject"},
+		{"other replay by token", "webhooks.replay.app]", "webhooks.replay.app, \"*.replay.b\"]", "could match a replay subject"},
 		{"replay placeholder inside a token", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"webhooks.replay.to-{consumer}.event\"", "must be <prefix>.replay.{consumer}"},
 		{"replay placeholder not last", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"webhooks.{consumer}.replay\"", "must be <prefix>.replay.{consumer}"},
-		{"replay catch-all", "webhooks.replay.rex]", "webhooks.replay.rex, webhooks.>]", "could match a replay subject"},
+		{"replay catch-all", "webhooks.replay.app]", "webhooks.replay.app, webhooks.>]", "could match a replay subject"},
 		{"http header twice", "command: {path: /usr/local/bin/handler}", "http: {url: http://x, set_headers: {Authorization: {env: A}, authorization: {env: B}}}", "are the same header"},
 		{"same streams", "dead_letter: {stream: WEBHOOK_DEAD}", "dead_letter: {stream: WEBHOOK_EVENTS}", "must differ"},
-		{"no filters", "filter_subjects: [webhooks.events.resend, webhooks.replay.rex]", "", "filter_subjects is required"},
+		{"no filters", "filter_subjects: [webhooks.events.resend, webhooks.replay.app]", "", "filter_subjects is required"},
 		{"bad filter", "webhooks.events.resend,", "webhooks.>.resend,", "filter_subjects"},
-		{"replay not filtered", "webhooks.replay.rex]", "webhooks.replay.other]", "must list webhooks.replay.rex"},
-		{"dead letters consumed", "webhooks.replay.rex]", "webhooks.replay.rex, webhooks.dead.>]", "dead_letter.subject"},
+		{"replay not filtered", "webhooks.replay.app]", "webhooks.replay.other]", "must list webhooks.replay.app"},
+		{"dead letters consumed", "webhooks.replay.app]", "webhooks.replay.app, webhooks.dead.>]", "dead_letter.subject"},
 		{"bad replay template", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\nreplay_subject: \"replay.{source}\"", "replay_subject"},
 		{"reserved pass header", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\npass_headers: [Nats-*]", "reserved"},
 		{"reserved pass prefix", "stream: WEBHOOK_EVENTS", "stream: WEBHOOK_EVENTS\npass_headers: [hook*]", "reserved"},
@@ -164,7 +164,7 @@ func TestDeadMessageIDsUnambiguous(t *testing.T) {
 			t.Errorf("%q accepted", n)
 		}
 	}
-	for _, n := range []string{"WEBHOOK_EVENTS", "rex", "relay-1"} {
+	for _, n := range []string{"WEBHOOK_EVENTS", "app", "relay-1"} {
 		if !validName(n) {
 			t.Errorf("%q rejected", n)
 		}
@@ -177,7 +177,7 @@ func TestMayMatchReplay(t *testing.T) {
 		"*.events.*": false, "a.b.replay": false, "webhooks.replay.x.y": false, "replay": false, "*": false,
 		"a.*": false, "replay.a": true, "*.a": true,
 		"webhooks.replay.b": true, "webhooks.>": true, ">": true, "*.replay.x": true, "a.>": true, "a.b.c.>": true,
-		"custom.replay.rex": true, "webhooks.*.*": true, "*.*.*": true, "webhooks.*.resend": true,
+		"custom.replay.app": true, "webhooks.*.*": true, "*.*.*": true, "webhooks.*.resend": true,
 	}
 	for f, want := range cases {
 		if got := mayMatchReplay(f); got != want {
