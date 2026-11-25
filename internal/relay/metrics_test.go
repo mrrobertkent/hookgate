@@ -1,11 +1,14 @@
 package relay
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/mrrobertkent/hookgate/internal/testutil"
 )
@@ -58,14 +61,18 @@ func TestInfoMetricBeforeRun(t *testing.T) {
 
 func TestInfoMetricWhileUnready(t *testing.T) {
 	e := newEnv(t)
-	// No consumer exists, so the relay runs but never becomes ready.
+	// No consumer exists, so the relay connects, runs its checks and stays unready.
 	r := start(t, e.config(t, "app", helperHandler(t, "exit", "0")), false)
 	testutil.Eventually(t, 10*time.Second, func() bool {
-		err := r.notReady()
-		return err != nil && err.Error() != "not checked yet"
-	}, "readiness never checked")
+		return errors.Is(r.notReady(), jetstream.ErrConsumerNotFound)
+	}, "relay never reported the missing consumer")
+	rec := httptest.NewRecorder()
+	r.Admin().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("/readyz answered %d", rec.Code)
+	}
 	checkInfo(t, scrape(t, r.Relay))
-	if v := metric(r.Relay, "hookgate_relay_ready"); v == 1 {
+	if v := metric(r.Relay, "hookgate_relay_ready"); v != 0 {
 		t.Errorf("hookgate_relay_ready %v while unready", v)
 	}
 }
@@ -82,7 +89,8 @@ func TestInfoMetricSharedConsumer(t *testing.T) {
 	for _, r := range []*running{a, b} {
 		checkInfo(t, scrape(t, r.Relay))
 	}
-	if metric(a.Relay, outcome(outcomeAcked)) != 1 && metric(b.Relay, outcome(outcomeAcked)) != 1 {
-		t.Error("no relay acked the event")
-	}
+	// The counter moves after the server confirms the ack, so it can trail waitSettled.
+	testutil.Eventually(t, 5*time.Second, func() bool {
+		return max(metric(a.Relay, outcome(outcomeAcked)), 0)+max(metric(b.Relay, outcome(outcomeAcked)), 0) == 1
+	}, "the event was not acked by exactly one relay")
 }
