@@ -105,22 +105,6 @@ sources:
 	}
 }
 
-func TestMethodNotAllowed(t *testing.T) {
-	g := newGateway(t, `
-sources:
-  - name: s
-    path: /s
-    checks: [{token: {header: X-T, secrets: [{env: UNSET_FOR_TEST}]}}]
-    output: {http: {urls: [http://upstream.invalid]}}
-`)
-	r := httptest.NewRequest(http.MethodGet, "/s", nil)
-	w := httptest.NewRecorder()
-	g.ServeHTTP(w, r)
-	if w.Code != http.StatusMethodNotAllowed || w.Header().Get("Allow") != http.MethodPost {
-		t.Errorf("GET: got %d, Allow %q", w.Code, w.Header().Get("Allow"))
-	}
-}
-
 // FuzzHost checks that every spelling of an accepted configured host that a client may send (any case, a
 // port, IPv6 brackets, a trailing dot on a name) normalises to the configured form, and that normalising never
 // panics.

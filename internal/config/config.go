@@ -47,6 +47,7 @@ type Source struct {
 	Path         string   `yaml:"path"`
 	MaxBodyBytes int64    `yaml:"max_body_bytes"`
 	AllowQuery   bool     `yaml:"allow_query"`
+	AnswerProbes bool     `yaml:"answer_probes"`
 	RejectStatus int      `yaml:"reject_status"`
 	Checks       []Check  `yaml:"checks"`
 	Output       Output   `yaml:"output"`

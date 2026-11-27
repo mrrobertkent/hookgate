@@ -67,13 +67,15 @@ hookgate stores each object completely before it becomes visible, never overwrit
 
 ## What the sender is told
 
-The sender gets `200` only after the stream acknowledged the message, with the body:
+A `POST` gets `200` only after the stream acknowledged the message, with the body:
 
 ```json
 {"status":"accepted","duplicate":false}
 ```
 
 `duplicate` is `true` when the stream already held a message with the same `Nats-Msg-Id`: the event is safe, and the sender gets `200` all the same.
+
+A `200` to a `GET` or `HEAD` [probe](configuration.md#probes) acknowledges no event: it has an empty body and nothing is published.
 
 | Outcome | Status | `hookgate_requests_total` outcome |
 |---|---|---|

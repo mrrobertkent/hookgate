@@ -1,4 +1,4 @@
-// Package gateway serves the webhook endpoints: it verifies each request against its source's checks and
+// Package gateway serves the webhook endpoints: it verifies each POST against its source's checks and
 // delivers only verified requests to the source's output.
 package gateway
 
@@ -28,7 +28,7 @@ type source struct {
 	cfg       config.Source
 	verifiers []verify.Verifier
 	out       output.Output
-	notReady  error // set when a secret is missing; the source then answers 503 and delivers nothing
+	notReady  error // set when a secret is missing; the source then answers POSTs with 503 and delivers nothing
 }
 
 // route holds the sources that share one path: those that list hosts, by host, and the one without hosts.
@@ -50,7 +50,8 @@ type Gateway struct {
 }
 
 // New builds the gateway and opens the connections its outputs use. A source whose secrets cannot be resolved
-// stays configured but not ready: it answers 503 and never delivers, while every other source keeps serving.
+// stays configured but not ready: it answers POSTs with 503 and never delivers, while every other source keeps
+// serving.
 // Close releases the connections when Run is not used.
 func New(cfg *config.Config, log *slog.Logger) *Gateway {
 	g := &Gateway{
@@ -106,7 +107,7 @@ func (g *Gateway) build(sc config.Source, connErrs map[string]error) *source {
 		})
 	}
 	if s.notReady != nil {
-		g.log.Error("source not ready; it answers 503 until its secrets are set", "source", sc.Name, "error", s.notReady)
+		g.log.Error("source not ready; it answers POSTs with 503 until its secrets are set", "source", sc.Name, "error", s.notReady)
 	}
 	_, watched := s.out.(output.Watcher)
 	g.m.setReady(sc.Name, s.notReady == nil && !watched)
@@ -207,8 +208,15 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	x := &exchange{g: g, w: w, r: r, name: s.cfg.Name, start: received}
-	if rej := precheck(w, r, s); rej != nil {
+	probe := s.cfg.AnswerProbes && (r.Method == http.MethodGet || r.Method == http.MethodHead)
+	if rej := precheck(r, s, probe); rej != nil {
 		x.reply(*rej)
+		return
+	}
+	if probe {
+		x.finish(output.Result{Status: http.StatusOK, Outcome: "probe", Header: http.Header{
+			"Cache-Control": {"no-store"}, "Content-Length": {"0"},
+		}})
 		return
 	}
 	select {
@@ -300,14 +308,20 @@ func logLevel(res output.Result) slog.Level {
 
 var unavailableBody = []byte("unavailable\n")
 
-// precheck rejects a request that no check could accept or no output could take, before its body is read.
-func precheck(w http.ResponseWriter, r *http.Request, s *source) *rejection {
+// precheck checks the method and query string, then checks encoding and delivery readiness for POSTs.
+func precheck(r *http.Request, s *source, probe bool) *rejection {
 	switch ce := r.Header.Get("Content-Encoding"); {
-	case r.Method != http.MethodPost:
-		w.Header().Set("Allow", http.MethodPost)
-		return &rejection{status: http.StatusMethodNotAllowed, outcome: "bad_request", reason: "method " + r.Method}
+	case r.Method != http.MethodPost && !probe:
+		allow := http.MethodPost
+		if s.cfg.AnswerProbes {
+			allow = "GET, HEAD, POST"
+		}
+		return &rejection{status: http.StatusMethodNotAllowed, outcome: "bad_request", reason: "method " + r.Method,
+			header: http.Header{"Allow": {allow}}}
 	case r.URL.RawQuery != "" && !s.cfg.AllowQuery:
 		return &rejection{status: http.StatusBadRequest, outcome: "bad_request", reason: "query string not allowed"}
+	case probe:
+		return nil
 	case ce != "" && ce != "identity":
 		return &rejection{status: http.StatusUnsupportedMediaType, outcome: "bad_request", reason: "content-encoding " + ce}
 	case s.notReady != nil:
