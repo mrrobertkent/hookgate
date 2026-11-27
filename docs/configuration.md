@@ -8,7 +8,7 @@ hookgate reads one YAML file: `-config FILE`, else `$HOOKGATE_CONFIG`, else `/et
 |---|---|---|
 | `listen` | `:8080` | Webhook listener. |
 | `admin_listen` | `:9090` | `/healthz`, `/readyz` ([Readiness](#readiness)), `/metrics`. Keep it off the public network. |
-| `max_concurrent` | `64` | Requests verified or delivered at once; extra requests get `503`. |
+| `max_concurrent` | `64` | `POST`s admitted for verification and delivery at once; a further `POST` that would be admitted gets `503`. |
 | `read_header_timeout` | `5s` | Time allowed for request headers. |
 | `read_timeout` | `15s` | Time allowed for the whole request, body included. |
 | `write_timeout` | `60s` | Time allowed to write the response; must exceed the longest output `timeout`. |
@@ -33,7 +33,7 @@ readiness:
 | `readiness.require_output_connections` | `false` | `true`: `/readyz` answers `503` while any connection a source's output uses has been disconnected for longer than `disconnect_grace`, so a balancer routes around the instance until it reconnects. |
 | `readiness.disconnect_grace` | `5s` | How long a connection may be down, from the moment it is first seen down, before it fails readiness; a reconnect within it leaves `/readyz` at `200`. `0s` fails it at once. Must be `>= 0`. Keep `nats.connect_timeout` well below it ([sizing](high-availability.md#nats-connections)). |
 
-Only conditions local to one instance fail readiness. A configuration fault never does, because every instance loads the same configuration and would leave the balancer without a target: a missing or malformed secret, a connection whose credentials cannot be loaded or are rejected (`hookgate_nats_credentials_rejected`), or a JetStream destination that fails its [checks](#outputjetstream) (stream or bucket missing or too small) makes only its own source answer `503`, and the other sources keep serving. When to turn the option on: [High availability](high-availability.md#readiness).
+Only conditions local to one instance fail readiness. A configuration fault never does, because every instance loads the same configuration and would leave the balancer without a target: a missing or malformed secret, a connection whose credentials cannot be loaded or are rejected (`hookgate_nats_credentials_rejected`), or a JetStream destination that fails its [checks](#outputjetstream) (stream or bucket missing or too small) makes only its own source answer `POST`s with `503`, and the other sources keep serving. When to turn the option on: [High availability](high-availability.md#readiness).
 
 ## Sources
 
@@ -46,6 +46,7 @@ Each entry of `sources` is one sender.
 | `path` | required | Exact request path, for example `/github`. |
 | `max_body_bytes` | `1048576` | Larger bodies get `413` and are never delivered. The whole body is held in memory while it is verified and delivered, so memory peaks at about `max_concurrent` × the largest `max_body_bytes`. |
 | `allow_query` | `false` | Requests with a query string get `400` unless set: query parameters are not covered by signatures. |
+| `answer_probes` | `false` | `true` answers `GET` and `HEAD` with an empty `200`, for senders that probe the URL. See [Probes](#probes). |
 | `reject_status` | `401` | Status returned when a check fails. Must not be `2xx` for a JetStream output. |
 | `checks` | required | One or more checks; **all** must pass. A source with no checks is a configuration error. |
 | `output` | required | Where verified requests go: exactly one of [`http`](#outputhttp) or [`jetstream`](#outputjetstream). |
@@ -66,7 +67,13 @@ The precedence matches nginx, where a `server_name` that equals the host wins ov
 
 hookgate repeats the host match, so a request the proxy misroutes never reaches a source that lists other hosts.
 
-Requests must be `POST` (else `405`) with no `Content-Encoding` other than `identity` (else `415`): signatures cover the bytes as sent.
+Webhook deliveries use `POST` with either `answer_probes` setting, with no `Content-Encoding` other than `identity` (else `415`): signatures cover the bytes as sent. A method the source does not support gets `405` with `Allow: POST`, or `Allow: GET, HEAD, POST` with `answer_probes: true`.
+
+### Probes
+
+Some senders send `HEAD` or `GET` to the webhook URL when it is registered or while delivering, and expect `200`. With `answer_probes: true`, a `GET` or `HEAD` routed to the source (the routed source's own setting applies, see [Routing](#routing)) that passes its `allow_query` rule gets `200` with an empty body, `Cache-Control: no-store`, `Content-Length: 0` and no `Content-Type`. hookgate does not read or process a probe's body, and nothing is verified or delivered. The answer does not depend on the source's readiness (missing secrets, output down, destination checks failing), on `Content-Encoding` or on `max_concurrent`. A probe with a query string the source does not allow gets `400` (`bad_request`). Answered probes are counted under outcome `probe`, logged like other requests, and not counted in `hookgate_in_flight_requests`.
+
+The `200` means only that the route exists. `/readyz` tells a load balancer whether the instance should receive traffic ([Readiness](#readiness)); `hookgate_source_ready` reports whether each source can deliver.
 
 ### `token` check
 
@@ -140,7 +147,7 @@ secrets:
 
 Token and HMAC secrets must be at least 16 bytes (`standard_webhooks` secrets: 24 decoded bytes); use a random value such as `openssl rand -hex 32`. A shorter secret, optional or not, makes its source not ready, and the error names the reference, never the value.
 
-A non-optional secret that is unset, empty or unreadable makes its source **not ready**: the source answers `503` and delivers nothing, the error is logged, and `hookgate_source_ready{source=...}` is `0`. Other sources keep serving. A check whose secrets are all optional and all unset is also not ready, so a source can never run without a secret.
+A non-optional secret that is unset, empty or unreadable makes its source **not ready**: the source answers `POST`s with `503` and delivers nothing, the error is logged, and `hookgate_source_ready{source=...}` is `0`. Other sources keep serving. A check whose secrets are all optional and all unset is also not ready, so a source can never run without a secret.
 
 **Rotation:** add the new secret as a second, optional reference, deploy, switch the sender to the new secret, then remove the old reference.
 
@@ -171,7 +178,7 @@ connections:
 | `nats.inbox_prefix` | `_INBOX.<name>` | Prefix of the reply subjects; the identity needs subscribe permission on `<prefix>.>` only. Dot-separated tokens without whitespace or wildcards. |
 | `nats.connect_timeout` | `5s` | Limit for one connection attempt. The client holds its lock during an attempt, so a publish that starts while the client is in a reconnect handshake can wait up to this long before it fails or proceeds. |
 
-Authentication secrets may not be `optional`. An unset or unusable one (a seed, creds or TLS file that cannot be read or parsed) makes every source using the connection not ready, like a missing check secret; it is logged and `hookgate_nats_credentials_rejected` is `1` until the file is fixed and hookgate restarted. An unreachable server is not an error: the client retries forever (with jitter), and the sources answer `503` until it connects. Rejected credentials are retried too: the server refusing the authentication (authorization violation, expired or revoked authentication) or the client certificate, the server's certificate failing verification against `tls.ca`, or a seed or creds file that cannot be read or parsed when the client signs in again. Once seen, a rejection lasts until the connection succeeds. Meanwhile the sources answer `503`, the rejection is logged and `hookgate_nats_credentials_rejected` is `1`. Publishing never waits for a reconnect behind the scenes; it fails at once and the output retries within its `timeout`.
+Authentication secrets may not be `optional`. An unset or unusable one (a seed, creds or TLS file that cannot be read or parsed) makes every source using the connection not ready, like a missing check secret; it is logged and `hookgate_nats_credentials_rejected` is `1` until the file is fixed and hookgate restarted. An unreachable server is not an error: the client retries forever (with jitter), and the sources answer `POST`s with `503` until it connects. Rejected credentials are retried too: the server refusing the authentication (authorization violation, expired or revoked authentication) or the client certificate, the server's certificate failing verification against `tls.ca`, or a seed or creds file that cannot be read or parsed when the client signs in again. Once seen, a rejection lasts until the connection succeeds. Meanwhile the sources answer `POST`s with `503`, the rejection is logged and `hookgate_nats_credentials_rejected` is `1`. Publishing never waits for a reconnect behind the scenes; it fails at once and the output retries within its `timeout`.
 
 ## `output.http`
 
@@ -227,7 +234,7 @@ output:
 
 **Inline or claim check.** A body is published inline when it is at most `inline_max_bytes` and, with its headers, fits the smaller of the server's `max_payload` and the stream's `max_msg_size`. Otherwise it is stored under `<source>/<event id>/<sha256>` (or `<source>/<sha256>` without an ID) in chunks of 128 KiB, each acknowledged, and only then is the object's metadata created, on condition that none exists. An existing object is reused when every chunk its metadata counts is still stored, its size and digest match, and its first chunk is no older than `reuse_within`. Otherwise the body goes to `<key>/<n>`, where `n` numbers the `reuse_within`-long time window, so retries in one window share it. hookgate never overwrites, purges or deletes. A body stored for a publish that then fails stays until the bucket TTL removes it.
 
-**Checks.** On every connect and reconnect, every 5 s while one fails and every 30 s while all pass, the source checks its destination. While a check fails the source answers `503`, logs the reason and reports `hookgate_source_ready 0`:
+**Checks.** On every connect and reconnect, every 5 s while one fails and every 30 s while all pass, the source checks its destination. While a check fails the source answers `POST`s with `503`, logs the reason and reports `hookgate_source_ready 0`:
 
 - the stream exists, stores the source's subject (one of its subjects, wildcards included, matches it), acknowledges publishes (`no_ack` false), uses `limits` retention (with `interest` or `workqueue` retention a stream can acknowledge an event without storing it) and `discard: new` (with `discard: old` a full stream evicts acknowledged events);
 - `inline_max_bytes` + `max_header_bytes` fits the smaller of the server's `max_payload` and the stream's `max_msg_size`;
@@ -240,7 +247,7 @@ output:
 
 A stream on memory storage or with one replica passes, with a warning in the log: an acknowledgement then does not survive the loss of a server. See [pairing a stream](contract.md#pairing-a-stream).
 
-A disconnect invalidates the last check, and so does any reconnect, counted by the client: while the connection is down, and after a reconnect until the checks pass on the new connection, the source answers `503` and reports `hookgate_source_ready 0`. Readiness is checked again after the body is read, before delivery. Every publish attempt runs on a connection the checks passed on: when the client has reconnected since the last check, the checks run on the new connection before the publish (a failure answers `503`), and an acknowledgement that arrives after the client changed connections is not trusted, so the attempt is retried. A disconnect or failed connection attempt marks the connection down at once, and its status is sampled every 250 ms and after every connection event; admitting a request and answering `/readyz` read only that recorded status, so neither waits on a reconnect in progress.
+A disconnect invalidates the last check, and so does any reconnect, counted by the client: while the connection is down, and after a reconnect until the checks pass on the new connection, the source answers `POST`s with `503` and reports `hookgate_source_ready 0`. Readiness is checked again after the body is read, before delivery. Every publish attempt runs on a connection the checks passed on: when the client has reconnected since the last check, the checks run on the new connection before the publish (a failure answers `503`), and an acknowledgement that arrives after the client changed connections is not trusted, so the attempt is retried. A disconnect or failed connection attempt marks the connection down at once, and its status is sampled every 250 ms and after every connection event; admitting a request and answering `/readyz` read only that recorded status, so neither waits on a reconnect in progress.
 
 **Shutdown.** On SIGTERM, requests already admitted finish their publish; the NATS connections are drained only after the HTTP server has shut down, within what is left of `shutdown_timeout`.
 
@@ -250,7 +257,7 @@ A disconnect invalidates the last check, and so does any reconnect, counted by t
 
 | Metric | Type | Labels |
 |---|---|---|
-| `hookgate_requests_total` | counter | `source`, `outcome` = `forwarded`, `published`, `duplicate`, `rejected`, `upstream_error`, `output_error`, `too_large`, `bad_request`, `not_ready`, `busy` |
+| `hookgate_requests_total` | counter | `source`, `outcome` = `forwarded`, `published`, `duplicate`, `rejected`, `upstream_error`, `output_error`, `too_large`, `bad_request`, `not_ready`, `busy`, `probe` |
 | `hookgate_upstream_attempts_total` | counter | `source`, `result` = `2xx`, `3xx`, `4xx`, `5xx`, `error` |
 | `hookgate_publish_attempts_total` | counter | `source`, `result` = `ok`, `duplicate`, `timeout`, `unavailable`, `too_large`, `error` |
 | `hookgate_publish_duration_seconds` | histogram | `source`; one observation per publish attempt |

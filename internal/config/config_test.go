@@ -32,6 +32,26 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestAnswerProbes(t *testing.T) {
+	for _, c := range []struct {
+		name, yaml string
+		want       bool
+	}{
+		{"omitted", minimal, false},
+		{"enabled", minimal + "    answer_probes: true\n", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			cfg, err := Parse([]byte(c.yaml))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cfg.Sources[0].AnswerProbes; got != c.want {
+				t.Errorf("AnswerProbes = %t, want %t", got, c.want)
+			}
+		})
+	}
+}
+
 func TestValidationErrors(t *testing.T) {
 	cases := map[string]string{
 		"no sources":     `listen: ":1"`,
@@ -44,6 +64,7 @@ func TestValidationErrors(t *testing.T) {
 		"env and file":   strings.Replace(minimal, "{env: K}", "{env: K, file: /f}", 1),
 		"timeouts":       strings.Replace(minimal, "http: {", "http: {attempt_timeout: 10s, timeout: 1s, ", 1),
 		"unknown key":    minimal + "    colour: blue\n",
+		"invalid probe":  minimal + "    answer_probes: invalid\n",
 	}
 	for name, y := range cases {
 		if _, err := Parse([]byte(y)); err == nil {

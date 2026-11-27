@@ -27,9 +27,9 @@ Data pipelines are built to accept whatever arrives. A webhook endpoint in front
 hookgate closes that path:
 
 - **Verifies per sender.** Static tokens, HMAC-SHA1/256/512 signatures in hex, base64 or base64url with prefixes and multi-signature headers, and Standard Webhooks (Svix) signatures with timestamp checks. Every check of a source must pass.
-- **Fails closed.** A missing or too-short secret takes its own source offline (`503`), never open. Unknown config keys stop startup.
+- **Fails closed.** A missing or too-short secret blocks delivery for its own source (`503`); it never fails open. Unknown config keys stop startup.
 - **Delivers exactly what it verified.** The output receives the verified bytes and an allowlist of headers, nothing else, with retries across instances.
-- **Saves, then acknowledges.** With the JetStream output the sender gets `200` only once the stream holds the event; large bodies go to an Object Store first (claim check).
+- **Saves, then acknowledges.** With the JetStream output the sender gets `200` for an event only once the stream holds it; large bodies go to an Object Store first (claim check).
 - **Costs almost nothing.** One ~16 MB distroless image, no database, no queue, Prometheus metrics built in.
 
 ## How it works
@@ -44,7 +44,7 @@ flowchart LR
 ```
 
 1. The request path, and the host when the source lists hosts, selects a source; anything else is `404`.
-2. Method, query string, encoding and the source's body cap `max_body_bytes` are checked (`405`, `400`, `415`, `413`). The cap is abuse protection, set above anything the sender legitimately sends. With the JetStream output, a body within the cap is published inline, or through the claim check when it is over `inline_max_bytes`.
+2. Method, query string, encoding and the source's body cap `max_body_bytes` are checked (`405`, `400`, `415`, `413`). A source with [`answer_probes`](docs/configuration.md#probes) answers a `GET` or `HEAD` that passes the query-string rule with an empty `200` instead, without reading the body or delivering anything. The cap is abuse protection, set above anything the sender legitimately sends. With the JetStream output, a body within the cap is published inline, or through the claim check when it is over `inline_max_bytes`.
 3. Every check of the source runs against the raw body. A failure returns `401` and nothing is delivered.
 4. The verified bytes go to the source's output. An HTTP output retries transport errors and `5xx` responses on the next instance and returns the upstream's response; a JetStream output answers `200` once the stream has stored the event and `503` when it cannot.
 
@@ -318,7 +318,7 @@ sources:
 - Messages go to `webhooks.events.<source>` with the verified body and `Hookgate-*` headers: source, event ID, SHA-256, size, receive time. The [event contract](docs/contract.md) is what consumers build against.
 - The event ID a check authenticates (or, by explicit opt-in, an unsigned header) becomes `Nats-Msg-Id: <source>:<event id>`, so the broker drops repeats; delivery is at least once, without ordering.
 - Bodies above `inline_max_bytes` are stored in a JetStream Object Store bucket first, never overwritten or deleted by hookgate, and the message carries a reference.
-- The source answers `503` while its connection is down or while the stream or bucket does not fit its limits; it checks again on every reconnect.
+- The source answers `POST`s with `503` while its connection is down or while the stream or bucket does not fit its limits; it checks again on every reconnect.
 
 A runnable three-node cluster with the gateway: [examples/jetstream](examples/jetstream/).
 
@@ -330,7 +330,7 @@ A runnable three-node cluster with the gateway: [examples/jetstream](examples/je
 
 - **Health:** `GET /healthz` on the admin port (process up), `GET /readyz` (`503` while draining, and optionally while an output connection is lost: [readiness](docs/configuration.md#readiness)). The image's `HEALTHCHECK` runs `hookgate healthcheck`.
 - **Graceful rollout:** on SIGTERM hookgate keeps serving for `drain_delay`, then gives in-flight requests `shutdown_timeout`, then drains its NATS connections. Set your orchestrator's stop grace period above their sum.
-- **Limits:** per-source body cap, server read and idle timeouts, `max_concurrent` in-flight requests (`503` beyond it).
+- **Limits:** per-source body cap, server read and idle timeouts, `max_concurrent` in-flight deliveries (`503` beyond it).
 - **Metrics:** `GET /metrics` exposes request outcomes, upstream and publish attempts, publish latency, claim-check stores, NATS connection state, source readiness, in-flight requests, draining and instance readiness ([list](docs/configuration.md#metrics)). Alert on `hookgate_source_ready == 0`, `hookgate_nats_connected == 0`, `hookgate_nats_credentials_rejected == 1` and on `outcome=~"upstream_error|output_error"`. The relay serves its own metrics on its admin port ([list](docs/relay.md#operations)).
 - **Logs:** one JSON line per request with source, outcome, status, reason and timing. Secrets, signatures and bodies are never logged.
 
